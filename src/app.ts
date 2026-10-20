@@ -3,12 +3,19 @@ import AutoLoad, { AutoloadPluginOptions } from "@fastify/autoload";
 import { FastifyPluginAsync, FastifyServerOptions } from "fastify";
 import swagger from "@fastify/swagger";
 import swaggerUi from "@fastify/swagger-ui";
+import { validatorCompiler, serializerCompiler, jsonSchemaTransform } from "@fastify/type-provider-zod";
 
 export interface AppOptions extends FastifyServerOptions, Partial<AutoloadPluginOptions> {}
 // Pass --options via CLI arguments in command to enable these options.
 const options: AppOptions = {};
 
 const app: FastifyPluginAsync<AppOptions> = async (fastify, opts): Promise<void> => {
+  // Zod validation requests
+  fastify.setValidatorCompiler(validatorCompiler);
+
+  //Zod serialization and validation of responses
+  fastify.setSerializerCompiler(serializerCompiler);
+
   //Swagger - generate OpenAPI specification
   await fastify.register(swagger, {
     openapi: {
@@ -17,13 +24,8 @@ const app: FastifyPluginAsync<AppOptions> = async (fastify, opts): Promise<void>
         description: "REST API documentation",
         version: "1.0.0",
       },
-      servers: [
-        {
-          url: "http://localhost:3000",
-          description: "Local development",
-        },
-      ],
     },
+    transform: jsonSchemaTransform,
   });
 
   //Swagger UI - web documentation
