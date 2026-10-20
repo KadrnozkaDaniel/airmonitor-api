@@ -1,14 +1,17 @@
-import { FastifyPluginAsync } from "fastify";
-import { measurementsResponseSchema, type MeasurementsResponse } from "../../schemas/measurement.schema";
+import { FastifyPluginAsync } from 'fastify';
+import {
+  measurementsResponseSchema,
+  type MeasurementsResponse,
+} from '../../schemas/measurement.schema';
 
 const measurements: FastifyPluginAsync = async (fastify) => {
   fastify.get(
-    "/",
+    '/',
     {
       schema: {
-        tags: ["Measurements"],
-        summary: "Get measurements",
-        description: "Returns a list of measurements",
+        tags: ['Measurements'],
+        summary: 'Get measurements',
+        description: 'Returns a list of measurements',
 
         response: {
           200: measurementsResponseSchema,

@@ -1,9 +1,9 @@
-import z from "zod";
+import z from 'zod';
 
 export const measurementSchema = z.object({
-  id: z.number().int().positive().describe("Measurement ID"),
-  temperature: z.number().describe("Temperature in C°"),
-  humidity: z.number().min(0).max(100).describe("Relative humidity in %"),
+  id: z.number().int().positive().describe('Measurement ID'),
+  temperature: z.number().describe('Temperature in C°'),
+  humidity: z.number().min(0).max(100).describe('Relative humidity in %'),
 });
 
 export const measurementsResponseSchema = z.array(measurementSchema);
