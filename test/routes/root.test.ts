@@ -1,12 +1,18 @@
 import { test } from 'node:test';
-import * as assert from 'node:assert';
+import assert from 'node:assert/strict';
 import { build } from '../helper';
 
-test('default root route', async (t) => {
+test('GET /health returns API health status', async (t) => {
   const app = await build(t);
 
-  const res = await app.inject({
-    url: '/',
+  const response = await app.inject({
+    method: 'GET',
+    url: '/health',
   });
-  assert.deepStrictEqual(JSON.parse(res.payload), { root: true });
+
+  assert.equal(response.statusCode, 200);
+  assert.deepStrictEqual(response.json(), {
+    status: 'ok',
+  });
+  assert.match(response.headers['content-type'] ?? '', /^application\/json/);
 });
