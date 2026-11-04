@@ -14,6 +14,7 @@
     "watch:ts": "tsc -w",
     "dev": "npm run build:ts && concurrently -k -p \"[{name}]\" -n \"TypeScript,App\" -c \"yellow.bold,cyan.bold\" \"npm:watch:ts\" \"npm:dev:start\"",
     "dev:start": "fastify start --ignore-watch=.ts$ -w -l info -P dist/src/app.js",
+    "db:studio": "prisma studio --config prisma7.config.ts",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
@@ -51,6 +52,7 @@
     "prettier": "^3.9.10",
     "prisma": "^7.10.1",
     "ts-node": "^10.4.0",
+    "tsx": "^4.23.15",
     "typescript": "~5.9.2",
     "typescript-eslint": "^8.71.2"
   }

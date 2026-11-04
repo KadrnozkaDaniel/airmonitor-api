@@ -7,9 +7,7 @@ export default fp(
   async (fastify) => {
     const connectionString = process.env.DATABASE_URL;
 
-    if (!connectionString) {
-      throw new Error('DATABASE_URL env is missing');
-    }
+    if (!connectionString) throw new Error('DATABASE_URL is missing');
 
     const adapter = new PrismaPg({ connectionString });
     const prisma = new PrismaClient({ adapter });
