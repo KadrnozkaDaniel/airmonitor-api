@@ -1,0 +1,12 @@
+model Device {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String
+  ownerId   String   @db.Uuid
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  description String?
+
+  owner        User          @relation(fields: [ownerId], references: [id])
+  measurements Measurement[]
+
+  @@index([ownerId])
+}

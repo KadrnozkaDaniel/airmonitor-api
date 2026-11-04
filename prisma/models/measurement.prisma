@@ -1,0 +1,12 @@
+model Measurement {
+  id         String   @id @default(uuid()) @db.Uuid
+  deviceId   String   @db.Uuid
+  eco2       Int
+  tvoc       Int
+  measuredAt DateTime @db.Timestamptz(3)
+  receivedAt DateTime @default(now()) @db.Timestamptz(3)
+
+  device Device @relation(fields: [deviceId], references: [id])
+
+  @@unique([deviceId, measuredAt])
+}

@@ -68,3 +68,5 @@ dist
 .env
 .env.*
 !.env.example
+
+/prisma/generated
