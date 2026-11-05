@@ -4,5 +4,8 @@
     "outDir": "dist",
     "sourceMap": true
   },
+  "ts-node": {
+    "experimentalResolver": true
+  },
   "include": ["src/**/*.ts"]
 }

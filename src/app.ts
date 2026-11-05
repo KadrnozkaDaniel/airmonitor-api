@@ -42,6 +42,7 @@ const app: FastifyPluginAsync<AppOptions> = async (
     uiConfig: {
       docExpansion: 'list',
       deepLinking: true,
+      operationsSorter: 'method',
     },
   });
 

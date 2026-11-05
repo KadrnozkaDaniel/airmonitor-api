@@ -8,6 +8,7 @@ const measurements: FastifyPluginAsync = async (fastify) => {
   fastify.get(
     '/',
     {
+      prefixTrailingSlash: 'no-slash',
       schema: {
         tags: ['Measurements'],
         summary: 'Get measurements',

@@ -3,12 +3,12 @@ import * as assert from 'node:assert/strict';
 import { build } from '../../helper';
 import { measurementsResponseSchema } from '../../../src/schemas/measurement.schema';
 
-test('GET /mesurements/ - returns measurements matching the schema', async (t) => {
+test('GET /mesurements - returns measurements matching the schema', async (t) => {
   const app = await build(t);
 
   const response = await app.inject({
     method: 'GET',
-    url: '/mesurements/',
+    url: '/mesurements',
   });
 
   assert.equal(response.statusCode, 200);
