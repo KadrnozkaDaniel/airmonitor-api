@@ -31,9 +31,7 @@ export const deviceErrorResponseSchema = z.object({
 
 export const listDevicesQuerySchema = z.strictObject({
   ownerId: z.uuid().optional(),
-
   page: z.coerce.number().int().min(1).max(1_000_000).default(1),
-
   limit: z.coerce.number().int().min(1).max(100).default(10),
 });
 
