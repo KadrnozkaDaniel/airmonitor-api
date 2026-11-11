@@ -19,9 +19,19 @@ export const measurementResponseSchema = z.object({
   receivedAt: z.iso.datetime(),
 });
 
-export const listMeasurementsQuerySchema = paginationQuerySchema.extend({
-  deviceId: z.uuid(),
-});
+export const listMeasurementsQuerySchema = paginationQuerySchema
+  .extend({
+    deviceId: z.uuid(),
+    from: z.iso.datetime({ offset: true }).optional(),
+    to: z.iso.datetime({ offset: true }).optional(),
+  })
+  .refine(
+    ({ from, to }) => {
+      if (!from || !to) return true;
+      return new Date(from) <= new Date(to);
+    },
+    { message: 'From must not be later than to', path: ['from'] },
+  );
 
 export const listMeasurementsResponseSchema = paginatedResponseSchema(
   measurementResponseSchema,

@@ -299,6 +299,50 @@ test('GET /measurements filters devices and paginates newest measurements first'
   }
 });
 
+test('GET /measurements filters by an inclusive measuredAt range', async (t) => {
+  const { app, deviceId } = await setup(t);
+  const ids = [randomUUID(), randomUUID(), randomUUID(), randomUUID()];
+  await app.prisma.measurement.createMany({
+    data: ids.map((id, index) => ({
+      id,
+      deviceId,
+      eco2: 500,
+      tvoc: 10,
+      measuredAt: new Date(`2026-01-0${index + 1}T12:00:00.000Z`),
+    })),
+  });
+
+  for (const [query, expectedIds] of [
+    ['from=2026-01-02T12:00:00.000Z', [ids[3], ids[2], ids[1]]],
+    ['to=2026-01-02T12:00:00.000Z', [ids[1], ids[0]]],
+    [
+      'from=2026-01-02T12:00:00.000Z&to=2026-01-03T12:00:00.000Z',
+      [ids[2], ids[1]],
+    ],
+    [
+      'from=2026-01-03T13:00:00%2B01:00&to=2026-01-03T13:00:00%2B01:00',
+      [ids[2]],
+    ],
+    ['from=2026-01-05T00:00:00Z', []],
+  ] as const) {
+    const response = await app.inject({
+      method: 'GET',
+      url: `/measurements?deviceId=${deviceId}&${query}`,
+    });
+
+    assert.equal(response.statusCode, 200, `${query}: ${response.body}`);
+    const { data, pagination } = listMeasurementsResponseSchema.parse(
+      response.json(),
+    );
+    assert.deepEqual(
+      data.map((measurement) => measurement.id),
+      expectedIds,
+      query,
+    );
+    assert.equal(pagination.total, expectedIds.length, query);
+  }
+});
+
 test('GET /measurements returns an empty list for a device without measurements', async (t) => {
   const { app, deviceId } = await setup(t);
   const response = await app.inject({
@@ -374,6 +418,11 @@ test('GET /measurements rejects missing, invalid and unknown query parameters', 
       'limit=1.5',
       'limit=abc',
       'unknown=value',
+      'from=not-a-date',
+      'from=2026-01-01',
+      'to=2026-01-01T12:00:00',
+      'from=2026-01-02T00:00:00Z&to=2026-01-01T00:00:00Z',
+      'from=2026-01-01T02:00:00%2B01:00&to=2026-01-01T00:30:00Z',
     ].map((query) => `deviceId=${deviceId}&${query}`),
   ];
 

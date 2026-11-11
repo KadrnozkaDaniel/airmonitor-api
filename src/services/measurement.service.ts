@@ -49,7 +49,7 @@ export const listMeasurements = async (
   prisma: PrismaClient,
   query: ListMeasurementsQuery,
 ): Promise<ListMeasurementsResponse> => {
-  const { deviceId, page, limit } = query;
+  const { deviceId, page, limit, from, to } = query;
 
   const device = await prisma.device.findUnique({
     where: { id: deviceId },
@@ -58,7 +58,13 @@ export const listMeasurements = async (
 
   if (!device) throw new DeviceNotFoundError();
 
-  const where: Prisma.MeasurementWhereInput = { deviceId };
+  const where: Prisma.MeasurementWhereInput = {
+    deviceId,
+    measuredAt: {
+      gte: from ? new Date(from) : undefined,
+      lte: to ? new Date(to) : undefined,
+    },
+  };
 
   const [measurements, total] = await prisma.$transaction(
     [
