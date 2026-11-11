@@ -1,4 +1,8 @@
 import z from 'zod';
+import {
+  paginatedResponseSchema,
+  paginationQuerySchema,
+} from './common.schema';
 
 export const createDeviceBodySchema = z.strictObject({
   name: z
@@ -23,28 +27,12 @@ export const deviceResponseSchema = z.object({
   createdAt: z.iso.datetime(),
 });
 
-export const deviceErrorResponseSchema = z.object({
-  statusCode: z.number().int().min(400).max(599),
-  error: z.string(),
-  message: z.string(),
-});
-
-export const listDevicesQuerySchema = z.strictObject({
+export const listDevicesQuerySchema = paginationQuerySchema.extend({
   ownerId: z.uuid().optional(),
-  page: z.coerce.number().int().min(1).max(1_000_000).default(1),
-  limit: z.coerce.number().int().min(1).max(100).default(10),
 });
 
-export const listDevicesResponseSchema = z.object({
-  data: z.array(deviceResponseSchema),
-
-  pagination: z.object({
-    page: z.number().int().positive(),
-    limit: z.number().int().positive(),
-    total: z.number().int().nonnegative(),
-    totalPages: z.number().int().nonnegative(),
-  }),
-});
+export const listDevicesResponseSchema =
+  paginatedResponseSchema(deviceResponseSchema);
 
 export const deviceDetailParamsSchema = z.strictObject({
   id: z.uuid(),

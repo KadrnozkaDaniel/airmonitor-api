@@ -11,7 +11,10 @@ import type { PrismaClient } from '../../../prisma/generated/client';
 import appPlugin from '../../../src/app';
 import type {} from '../../../src/plugins/prisma';
 import measurementRoutes from '../../../src/routes/measurements';
-import { listMeasurementsResponseSchema } from '../../../src/schemas/measurement.schema';
+import {
+  listMeasurementsResponseSchema,
+  type MeasurementResponse,
+} from '../../../src/schemas/measurement.schema';
 
 async function setup(t: TestContext) {
   const app = Fastify();
@@ -47,6 +50,176 @@ async function setup(t: TestContext) {
 
   return { app, deviceId, otherDeviceId };
 }
+
+test('POST /measurements persists a measurement and GET returns the saved data', async (t) => {
+  const { app, deviceId } = await setup(t);
+
+  const response = await app.inject({
+    method: 'POST',
+    url: '/measurements',
+    payload: {
+      deviceId,
+      eco2: 450,
+      tvoc: 12,
+      measuredAt: '2026-01-01T13:00:00.000+01:00',
+    },
+  });
+
+  assert.equal(response.statusCode, 201, response.body);
+  assert.match(response.headers['content-type'] ?? '', /application\/json/);
+  const body = response.json<MeasurementResponse>();
+  assert.deepEqual(Object.keys(body).sort(), [
+    'eco2',
+    'id',
+    'measuredAt',
+    'receivedAt',
+    'tvoc',
+  ]);
+  assert.match(body.id, /^[0-9a-f-]{36}$/i);
+  assert.equal(body.eco2, 450);
+  assert.equal(body.tvoc, 12);
+  assert.equal(body.measuredAt, '2026-01-01T12:00:00.000Z');
+  assert.equal(new Date(body.receivedAt).toISOString(), body.receivedAt);
+
+  const saved = await app.prisma.measurement.findUniqueOrThrow({
+    where: { id: body.id },
+  });
+  assert.equal(saved.deviceId, deviceId);
+  assert.deepEqual(body, {
+    id: saved.id,
+    eco2: saved.eco2,
+    tvoc: saved.tvoc,
+    measuredAt: saved.measuredAt.toISOString(),
+    receivedAt: saved.receivedAt.toISOString(),
+  });
+
+  const list = await app.inject({
+    method: 'GET',
+    url: `/measurements?deviceId=${deviceId}`,
+  });
+  assert.equal(list.statusCode, 200, list.body);
+  assert.deepEqual(list.json(), {
+    data: [body],
+    pagination: { page: 1, limit: 10, total: 1, totalPages: 1 },
+  });
+});
+
+test('POST /measurements rejects invalid bodies without writing to the database', async (t) => {
+  const { app, deviceId } = await setup(t);
+  const valid = {
+    deviceId,
+    eco2: 450,
+    tvoc: 12,
+    measuredAt: '2026-01-01T12:00:00.000Z',
+  };
+  const invalidBodies = [
+    {},
+    { eco2: 450, tvoc: 12, measuredAt: valid.measuredAt },
+    { deviceId, tvoc: 12, measuredAt: valid.measuredAt },
+    { deviceId, eco2: 450, measuredAt: valid.measuredAt },
+    { deviceId, eco2: 450, tvoc: 12 },
+    { ...valid, deviceId: 'invalid-uuid' },
+    { ...valid, eco2: 1.5 },
+    { ...valid, eco2: '450' },
+    { ...valid, eco2: null },
+    { ...valid, tvoc: 1.5 },
+    { ...valid, tvoc: 2 ** 31 },
+    { ...valid, measuredAt: 'not-a-date' },
+    { ...valid, measuredAt: '2026-01-01' },
+    { ...valid, id: randomUUID() },
+    { ...valid, receivedAt: new Date().toISOString() },
+  ];
+
+  for (const payload of invalidBodies) {
+    const response = await app.inject({
+      method: 'POST',
+      url: '/measurements',
+      payload,
+    });
+    assert.equal(
+      response.statusCode,
+      400,
+      `${JSON.stringify(payload)}: ${response.body}`,
+    );
+    assert.equal(response.json().statusCode, 400);
+    assert.equal(response.json().error, 'Bad Request');
+  }
+
+  assert.equal(await app.prisma.measurement.count({ where: { deviceId } }), 0);
+});
+
+test('POST /measurements returns 422 for a nonexistent device', async (t) => {
+  const { app } = await setup(t);
+  const missingDeviceId = randomUUID();
+
+  const response = await app.inject({
+    method: 'POST',
+    url: '/measurements',
+    payload: {
+      deviceId: missingDeviceId,
+      eco2: 450,
+      tvoc: 12,
+      measuredAt: '2026-01-01T12:00:00.000Z',
+    },
+  });
+
+  assert.equal(response.statusCode, 422, response.body);
+  assert.deepEqual(response.json(), {
+    statusCode: 422,
+    error: 'Unprocessable Entity',
+    message: 'Measurement device does not exist',
+  });
+  assert.doesNotMatch(response.body, /Prisma|P2003|foreign key|stack/i);
+  assert.equal(
+    await app.prisma.measurement.count({
+      where: { deviceId: missingDeviceId },
+    }),
+    0,
+  );
+});
+
+test('POST /measurements returns 409 for a duplicate device and time', async (t) => {
+  const { app, deviceId, otherDeviceId } = await setup(t);
+  const payload = {
+    deviceId,
+    eco2: 450,
+    tvoc: 12,
+    measuredAt: '2026-01-01T12:00:00.000Z',
+  };
+
+  const first = await app.inject({
+    method: 'POST',
+    url: '/measurements',
+    payload,
+  });
+  assert.equal(first.statusCode, 201, first.body);
+
+  // Same instant expressed with a different offset is still a duplicate.
+  const duplicate = await app.inject({
+    method: 'POST',
+    url: '/measurements',
+    payload: { ...payload, eco2: 999, measuredAt: '2026-01-01T13:00:00+01:00' },
+  });
+
+  assert.equal(duplicate.statusCode, 409, duplicate.body);
+  assert.deepEqual(duplicate.json(), {
+    statusCode: 409,
+    error: 'Conflict',
+    message: 'Measurement for this device and time already exists',
+  });
+  assert.doesNotMatch(duplicate.body, /Prisma|P2002|unique|stack/i);
+
+  const saved = await app.prisma.measurement.findMany({ where: { deviceId } });
+  assert.equal(saved.length, 1);
+  assert.equal(saved[0].eco2, 450);
+
+  const otherDevice = await app.inject({
+    method: 'POST',
+    url: '/measurements',
+    payload: { ...payload, deviceId: otherDeviceId },
+  });
+  assert.equal(otherDevice.statusCode, 201, otherDevice.body);
+});
 
 test('GET /measurements returns saved measurements with serialized dates', async (t) => {
   const { app, deviceId } = await setup(t);
@@ -217,8 +390,12 @@ test('GET /measurements rejects missing, invalid and unknown query parameters', 
   }
 });
 
-for (const stage of ['device lookup', 'measurement query'] as const) {
-  test(`GET /measurements hides unexpected database errors during ${stage}`, async (t) => {
+for (const { method, stage } of [
+  { method: 'POST', stage: 'measurement create' },
+  { method: 'GET', stage: 'device lookup' },
+  { method: 'GET', stage: 'measurement query' },
+] as const) {
+  test(`${method} /measurements hides unexpected database errors during ${stage}`, async (t) => {
     const app = Fastify();
     t.after(() => app.close());
     app.setValidatorCompiler(validatorCompiler);
@@ -234,6 +411,7 @@ for (const stage of ['device lookup', 'measurement query'] as const) {
           stage === 'device lookup' ? fail : async () => ({ id: deviceId }),
       },
       measurement: {
+        create: fail,
         findMany: async () => [],
         count: async () => 0,
       },
@@ -241,10 +419,20 @@ for (const stage of ['device lookup', 'measurement query'] as const) {
     } as unknown as PrismaClient);
     await app.register(measurementRoutes, { prefix: '/measurements' });
 
-    const response = await app.inject({
-      method: 'GET',
-      url: `/measurements?deviceId=${deviceId}`,
-    });
+    const response = await app.inject(
+      method === 'POST'
+        ? {
+            method,
+            url: '/measurements',
+            payload: {
+              deviceId,
+              eco2: 450,
+              tvoc: 12,
+              measuredAt: '2026-01-01T12:00:00.000Z',
+            },
+          }
+        : { method, url: `/measurements?deviceId=${deviceId}` },
+    );
 
     assert.equal(response.statusCode, 500, response.body);
     assert.deepEqual(response.json(), {

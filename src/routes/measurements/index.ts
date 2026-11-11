@@ -1,14 +1,21 @@
+import { ZodTypeProvider } from '@fastify/type-provider-zod';
 import { FastifyPluginAsync } from 'fastify';
+import { DeviceNotFoundError } from '../../services/device.service';
 import {
+  addMeasurement,
+  DuplicateMeasurementError,
+  listMeasurements,
+  MeasurementDeviceNotFoundError,
+} from '../../services/measurement.service';
+import { errorResponseSchema } from '../../schemas/common.schema';
+import {
+  createMeasurementBodySchema,
   listMeasurementsQuerySchema,
   listMeasurementsResponseSchema,
-  measurementErrorResponseSchema,
+  measurementResponseSchema,
 } from '../../schemas/measurement.schema';
-import { ZodTypeProvider } from '@fastify/type-provider-zod';
-import { listMeasurements } from '../../services/measurement.service';
-import { DeviceNotFoundError } from '../../services/device.service';
 
-const measurement: FastifyPluginAsync = async (fastify) => {
+const measurements: FastifyPluginAsync = async (fastify) => {
   const app = fastify.withTypeProvider<ZodTypeProvider>();
 
   app.setErrorHandler((error, request, reply) => {
@@ -16,6 +23,22 @@ const measurement: FastifyPluginAsync = async (fastify) => {
       return reply.code(404).send({
         statusCode: 404,
         error: 'Not Found',
+        message: error.message,
+      });
+    }
+
+    if (error instanceof MeasurementDeviceNotFoundError) {
+      return reply.code(422).send({
+        statusCode: 422,
+        error: 'Unprocessable Entity',
+        message: error.message,
+      });
+    }
+
+    if (error instanceof DuplicateMeasurementError) {
+      return reply.code(409).send({
+        statusCode: 409,
+        error: 'Conflict',
         message: error.message,
       });
     }
@@ -39,6 +62,31 @@ const measurement: FastifyPluginAsync = async (fastify) => {
     });
   });
 
+  app.post(
+    '/',
+    {
+      prefixTrailingSlash: 'no-slash',
+      schema: {
+        tags: ['Measurements'],
+        summary: 'Create a measurement',
+        description: 'Creates a measurement belonging to an existing device.',
+        body: createMeasurementBodySchema,
+        response: {
+          201: measurementResponseSchema,
+          400: errorResponseSchema,
+          409: errorResponseSchema,
+          422: errorResponseSchema,
+          500: errorResponseSchema,
+        },
+      },
+    },
+    async (request, reply) => {
+      const measurement = await addMeasurement(app.prisma, request.body);
+
+      return reply.code(201).send(measurement);
+    },
+  );
+
   app.get(
     '/',
     {
@@ -50,9 +98,9 @@ const measurement: FastifyPluginAsync = async (fastify) => {
         querystring: listMeasurementsQuerySchema,
         response: {
           200: listMeasurementsResponseSchema,
-          400: measurementErrorResponseSchema,
-          404: measurementErrorResponseSchema,
-          500: measurementErrorResponseSchema,
+          400: errorResponseSchema,
+          404: errorResponseSchema,
+          500: errorResponseSchema,
         },
       },
     },
@@ -62,4 +110,4 @@ const measurement: FastifyPluginAsync = async (fastify) => {
   );
 };
 
-export default measurement;
+export default measurements;

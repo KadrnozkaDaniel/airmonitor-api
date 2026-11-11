@@ -1,9 +1,13 @@
 import z from 'zod';
+import {
+  paginatedResponseSchema,
+  paginationQuerySchema,
+} from './common.schema';
 
 export const createMeasurementBodySchema = z.strictObject({
   deviceId: z.uuid(),
-  eco2: z.int32(),
-  tvoc: z.int32(),
+  eco2: z.int32().nonnegative(),
+  tvoc: z.int32().nonnegative(),
   measuredAt: z.iso.datetime({ offset: true }),
 });
 
@@ -15,28 +19,13 @@ export const measurementResponseSchema = z.object({
   receivedAt: z.iso.datetime(),
 });
 
-export const listMeasurementsQuerySchema = z.strictObject({
+export const listMeasurementsQuerySchema = paginationQuerySchema.extend({
   deviceId: z.uuid(),
-  page: z.coerce.number().int().min(1).max(1_000_000).default(1),
-  limit: z.coerce.number().int().min(1).max(100).default(10),
 });
 
-export const listMeasurementsResponseSchema = z.object({
-  data: z.array(measurementResponseSchema),
-
-  pagination: z.object({
-    page: z.number().int().positive(),
-    limit: z.number().int().positive(),
-    total: z.number().int().nonnegative(),
-    totalPages: z.number().int().nonnegative(),
-  }),
-});
-
-export const measurementErrorResponseSchema = z.object({
-  statusCode: z.number().int().min(400).max(599),
-  error: z.string(),
-  message: z.string(),
-});
+export const listMeasurementsResponseSchema = paginatedResponseSchema(
+  measurementResponseSchema,
+);
 
 export type CreateMeasurementBody = z.infer<typeof createMeasurementBodySchema>;
 export type MeasurementResponse = z.infer<typeof measurementResponseSchema>;

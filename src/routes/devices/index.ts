@@ -10,11 +10,11 @@ import {
 import {
   createDeviceBodySchema,
   deviceDetailParamsSchema,
-  deviceErrorResponseSchema,
   deviceResponseSchema,
   listDevicesQuerySchema,
   listDevicesResponseSchema,
 } from '../../schemas/device.schema';
+import { errorResponseSchema } from '../../schemas/common.schema';
 
 const devices: FastifyPluginAsync = async (fastify) => {
   const app = fastify.withTypeProvider<ZodTypeProvider>();
@@ -66,9 +66,9 @@ const devices: FastifyPluginAsync = async (fastify) => {
         body: createDeviceBodySchema,
         response: {
           201: deviceResponseSchema,
-          400: deviceErrorResponseSchema,
-          422: deviceErrorResponseSchema,
-          500: deviceErrorResponseSchema,
+          400: errorResponseSchema,
+          422: errorResponseSchema,
+          500: errorResponseSchema,
         },
       },
     },
@@ -90,8 +90,8 @@ const devices: FastifyPluginAsync = async (fastify) => {
         querystring: listDevicesQuerySchema,
         response: {
           200: listDevicesResponseSchema,
-          400: deviceErrorResponseSchema,
-          500: deviceErrorResponseSchema,
+          400: errorResponseSchema,
+          500: errorResponseSchema,
         },
       },
     },
@@ -111,9 +111,9 @@ const devices: FastifyPluginAsync = async (fastify) => {
         params: deviceDetailParamsSchema,
         response: {
           200: deviceResponseSchema,
-          400: deviceErrorResponseSchema,
-          404: deviceErrorResponseSchema,
-          500: deviceErrorResponseSchema,
+          400: errorResponseSchema,
+          404: errorResponseSchema,
+          500: errorResponseSchema,
         },
       },
     },

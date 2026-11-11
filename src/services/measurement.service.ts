@@ -1,5 +1,6 @@
 import { Prisma, type PrismaClient } from '../../prisma/generated/client';
 import type {
+  CreateMeasurementBody,
   ListMeasurementsQuery,
   ListMeasurementsResponse,
   MeasurementResponse,
@@ -29,6 +30,20 @@ const toMeasurementResponse = (
     receivedAt: measurement.receivedAt.toISOString(),
   };
 };
+
+export class MeasurementDeviceNotFoundError extends Error {
+  constructor() {
+    super('Measurement device does not exist');
+    this.name = 'MeasurementDeviceNotFoundError';
+  }
+}
+
+export class DuplicateMeasurementError extends Error {
+  constructor() {
+    super('Measurement for this device and time already exists');
+    this.name = 'DuplicateMeasurementError';
+  }
+}
 
 export const listMeasurements = async (
   prisma: PrismaClient,
@@ -72,4 +87,29 @@ export const listMeasurements = async (
       totalPages: Math.ceil(total / limit),
     },
   };
+};
+
+export const addMeasurement = async (
+  prisma: PrismaClient,
+  input: CreateMeasurementBody,
+): Promise<MeasurementResponse> => {
+  try {
+    const measurement = await prisma.measurement.create({
+      data: {
+        deviceId: input.deviceId,
+        measuredAt: input.measuredAt,
+        eco2: input.eco2,
+        tvoc: input.tvoc,
+      },
+      select: measurementSelect,
+    });
+
+    return toMeasurementResponse(measurement);
+  } catch (e) {
+    if (e instanceof Prisma.PrismaClientKnownRequestError) {
+      if (e.code === 'P2003') throw new MeasurementDeviceNotFoundError();
+      if (e.code === 'P2002') throw new DuplicateMeasurementError();
+    }
+    throw e;
+  }
 };
