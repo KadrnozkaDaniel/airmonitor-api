@@ -21,6 +21,8 @@ jobs:
 
     env:
       DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/airmonitor_test
+      KEYCLOAK_ISSUER: http://localhost:8080/realms/airmonitor
+      KEYCLOAK_AUDIENCE: airmonitor-api
 
     services:
       postgres:
