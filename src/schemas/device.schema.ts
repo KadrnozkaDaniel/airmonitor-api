@@ -16,7 +16,6 @@ export const createDeviceBodySchema = z.strictObject({
     .max(1000, 'Description must not exceed 1000 characters')
     .nullable()
     .optional(),
-  ownerId: z.uuid(),
 });
 
 export const deviceResponseSchema = z.object({
@@ -27,9 +26,7 @@ export const deviceResponseSchema = z.object({
   createdAt: z.iso.datetime(),
 });
 
-export const listDevicesQuerySchema = paginationQuerySchema.extend({
-  ownerId: z.uuid().optional(),
-});
+export const listDevicesQuerySchema = paginationQuerySchema;
 
 export const listDevicesResponseSchema =
   paginatedResponseSchema(deviceResponseSchema);

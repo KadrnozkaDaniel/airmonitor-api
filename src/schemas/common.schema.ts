@@ -27,3 +27,9 @@ export const paginatedResponseSchema = <T extends z.ZodType>(item: T) =>
 export type ErrorResponse = z.infer<typeof errorResponseSchema>;
 export type PaginationQuery = z.infer<typeof paginationQuerySchema>;
 export type Pagination = z.infer<typeof paginationSchema>;
+
+export const authErrorResponses = {
+  401: errorResponseSchema,
+  409: errorResponseSchema,
+  503: errorResponseSchema,
+};

@@ -28,13 +28,6 @@ const toDeviceResponse = (device: SelectedDevice): DeviceResponse => {
   };
 };
 
-export class DeviceOwnerNotFoundError extends Error {
-  constructor() {
-    super('Device owner does not exist');
-    this.name = 'DeviceOwnerNotFoundError';
-  }
-}
-
 export class DeviceNotFoundError extends Error {
   constructor() {
     super('Device does not exist');
@@ -44,11 +37,12 @@ export class DeviceNotFoundError extends Error {
 
 export const listDevices = async (
   prisma: PrismaClient,
+  ownerId: string,
   query: ListDevicesQuery,
 ): Promise<ListDevicesResponse> => {
-  const { page, limit, ownerId } = query;
+  const { page, limit } = query;
 
-  const where: Prisma.DeviceWhereInput = ownerId ? { ownerId } : {};
+  const where = { ownerId } satisfies Prisma.DeviceWhereInput;
 
   const [devices, total] = await prisma.$transaction(
     [
@@ -81,10 +75,11 @@ export const listDevices = async (
 
 export const deviceDetail = async (
   prisma: PrismaClient,
+  ownerId: string,
   id: string,
 ): Promise<DeviceResponse> => {
   const device = await prisma.device.findUnique({
-    where: { id },
+    where: { id, ownerId },
     select: deviceSelect,
   });
 
@@ -95,26 +90,17 @@ export const deviceDetail = async (
 
 export const createDevice = async (
   prisma: PrismaClient,
+  ownerId: string,
   input: CreateDeviceBody,
 ): Promise<DeviceResponse> => {
-  try {
-    const device = await prisma.device.create({
-      data: {
-        name: input.name,
-        description: input.description ?? null,
-        ownerId: input.ownerId,
-      },
-      select: deviceSelect,
-    });
+  const device = await prisma.device.create({
+    data: {
+      name: input.name,
+      description: input.description ?? null,
+      ownerId,
+    },
+    select: deviceSelect,
+  });
 
-    return toDeviceResponse(device);
-  } catch (e) {
-    if (
-      e instanceof Prisma.PrismaClientKnownRequestError &&
-      e.code === 'P2003'
-    ) {
-      throw new DeviceOwnerNotFoundError();
-    }
-    throw e;
-  }
+  return toDeviceResponse(device);
 };

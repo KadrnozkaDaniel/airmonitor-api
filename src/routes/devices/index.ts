@@ -4,7 +4,6 @@ import {
   createDevice,
   deviceDetail,
   DeviceNotFoundError,
-  DeviceOwnerNotFoundError,
   listDevices,
 } from '../../services/device.service';
 import {
@@ -14,10 +13,15 @@ import {
   listDevicesQuerySchema,
   listDevicesResponseSchema,
 } from '../../schemas/device.schema';
-import { errorResponseSchema } from '../../schemas/common.schema';
+import {
+  authErrorResponses,
+  errorResponseSchema,
+} from '../../schemas/common.schema';
+import { requireUser } from '../../plugins/auth';
 
 const devices: FastifyPluginAsync = async (fastify) => {
   const app = fastify.withTypeProvider<ZodTypeProvider>();
+  app.addHook('onRequest', app.authenticate);
 
   app.setErrorHandler((error, request, reply) => {
     if (error instanceof DeviceNotFoundError) {
@@ -28,20 +32,12 @@ const devices: FastifyPluginAsync = async (fastify) => {
       });
     }
 
-    if (error instanceof DeviceOwnerNotFoundError) {
-      return reply.code(422).send({
-        statusCode: 422,
-        error: 'Unprocessable Entity',
-        message: 'Device oenew dos not exist',
-      });
-    }
-
     if (
       error instanceof Error &&
       'statusCode' in error &&
       typeof error.statusCode === 'number' &&
-      error.statusCode >= 400 &&
-      error.statusCode < 500
+      ((error.statusCode >= 400 && error.statusCode < 500) ||
+        error.statusCode === 503)
     ) {
       return reply.send(error);
     }
@@ -62,18 +58,19 @@ const devices: FastifyPluginAsync = async (fastify) => {
       schema: {
         tags: ['Devices'],
         summary: 'Create a device',
-        description: 'Creates a device belonging to an existing owner.',
+        description: 'Creates a device owned by the authenticated user',
         body: createDeviceBodySchema,
         response: {
           201: deviceResponseSchema,
           400: errorResponseSchema,
-          422: errorResponseSchema,
           500: errorResponseSchema,
+          ...authErrorResponses,
         },
       },
     },
     async (request, reply) => {
-      const device = await createDevice(app.prisma, request.body);
+      const user = requireUser(request);
+      const device = await createDevice(app.prisma, user.id, request.body);
 
       return reply.code(201).send(device);
     },
@@ -86,17 +83,19 @@ const devices: FastifyPluginAsync = async (fastify) => {
       schema: {
         tags: ['Devices'],
         summary: 'Devices List',
-        description: 'Returns a paginated list of devices',
+        description: 'Returns a paginated list of your devices',
         querystring: listDevicesQuerySchema,
         response: {
           200: listDevicesResponseSchema,
           400: errorResponseSchema,
           500: errorResponseSchema,
+          ...authErrorResponses,
         },
       },
     },
     async (request) => {
-      return listDevices(app.prisma, request.query);
+      const user = requireUser(request);
+      return listDevices(app.prisma, user.id, request.query);
     },
   );
 
@@ -114,11 +113,13 @@ const devices: FastifyPluginAsync = async (fastify) => {
           400: errorResponseSchema,
           404: errorResponseSchema,
           500: errorResponseSchema,
+          ...authErrorResponses,
         },
       },
     },
     async (request) => {
-      return deviceDetail(app.prisma, request.params.id);
+      const user = requireUser(request);
+      return deviceDetail(app.prisma, user.id, request.params.id);
     },
   );
 };
