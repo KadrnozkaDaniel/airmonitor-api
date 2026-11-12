@@ -13,6 +13,7 @@ import type {} from '../../../src/plugins/prisma';
 import measurementRoutes from '../../../src/routes/measurements';
 import {
   listMeasurementsResponseSchema,
+  measurementResponseSchema,
   type MeasurementResponse,
 } from '../../../src/schemas/measurement.schema';
 
@@ -439,10 +440,105 @@ test('GET /measurements rejects missing, invalid and unknown query parameters', 
   }
 });
 
+test('GET /measurements/latest returns the newest measurement of the device', async (t) => {
+  const { app, deviceId, otherDeviceId } = await setup(t);
+  const ids = [randomUUID(), randomUUID(), randomUUID()];
+  await app.prisma.measurement.createMany({
+    data: [
+      ...ids.map((id, index) => ({
+        id,
+        deviceId,
+        eco2: 500 + index,
+        tvoc: 10 + index,
+        measuredAt: new Date(`2026-01-0${3 - index}T12:00:00.000Z`),
+      })),
+      {
+        deviceId: otherDeviceId,
+        eco2: 900,
+        tvoc: 90,
+        measuredAt: new Date('2026-01-04T12:00:00.000Z'),
+      },
+    ],
+  });
+
+  const response = await app.inject({
+    method: 'GET',
+    url: `/measurements/latest?deviceId=${deviceId}`,
+  });
+
+  assert.equal(response.statusCode, 200, response.body);
+  assert.match(response.headers['content-type'] ?? '', /application\/json/);
+  const body = measurementResponseSchema.parse(response.json());
+  const saved = await app.prisma.measurement.findUniqueOrThrow({
+    where: { id: ids[0] },
+  });
+  assert.deepEqual(body, {
+    id: saved.id,
+    eco2: saved.eco2,
+    tvoc: saved.tvoc,
+    measuredAt: saved.measuredAt.toISOString(),
+    receivedAt: saved.receivedAt.toISOString(),
+  });
+});
+
+test('GET /measurements/latest returns 404 for a device without measurements', async (t) => {
+  const { app, deviceId } = await setup(t);
+  const response = await app.inject({
+    method: 'GET',
+    url: `/measurements/latest?deviceId=${deviceId}`,
+  });
+
+  assert.equal(response.statusCode, 404, response.body);
+  assert.deepEqual(response.json(), {
+    statusCode: 404,
+    error: 'Not Found',
+    message: 'Measurement does not exist',
+  });
+});
+
+test('GET /measurements/latest returns 404 for a nonexistent device', async (t) => {
+  const { app } = await setup(t);
+  const response = await app.inject({
+    method: 'GET',
+    url: `/measurements/latest?deviceId=${randomUUID()}`,
+  });
+
+  assert.equal(response.statusCode, 404, response.body);
+  assert.deepEqual(response.json(), {
+    statusCode: 404,
+    error: 'Not Found',
+    message: 'Device does not exist',
+  });
+});
+
+test('GET /measurements/latest rejects missing, invalid and unknown query parameters', async (t) => {
+  const { app, deviceId } = await setup(t);
+  const invalidQueries = [
+    '',
+    'deviceId=invalid-uuid',
+    'deviceId=',
+    `deviceId=${deviceId}&unknown=value`,
+    `deviceId=${deviceId}&page=1`,
+  ];
+
+  for (const query of invalidQueries) {
+    const response = await app.inject({
+      method: 'GET',
+      url: `/measurements/latest?${query}`,
+    });
+
+    assert.equal(response.statusCode, 400, `${query}: ${response.body}`);
+    assert.equal(response.json().statusCode, 400);
+    assert.equal(response.json().error, 'Bad Request');
+    assert.doesNotMatch(response.body, /Prisma|stack/i);
+  }
+});
+
 for (const { method, stage } of [
   { method: 'POST', stage: 'measurement create' },
   { method: 'GET', stage: 'device lookup' },
   { method: 'GET', stage: 'measurement query' },
+  { method: 'GET', stage: 'latest measurement query' },
 ] as const) {
   test(`${method} /measurements hides unexpected database errors during ${stage}`, async (t) => {
     const app = Fastify();
@@ -461,6 +557,7 @@ for (const { method, stage } of [
       },
       measurement: {
         create: fail,
+        findFirst: fail,
         findMany: async () => [],
         count: async () => 0,
       },
@@ -480,7 +577,9 @@ for (const { method, stage } of [
               measuredAt: '2026-01-01T12:00:00.000Z',
             },
           }
-        : { method, url: `/measurements?deviceId=${deviceId}` },
+        : stage === 'latest measurement query'
+          ? { method, url: `/measurements/latest?deviceId=${deviceId}` }
+          : { method, url: `/measurements?deviceId=${deviceId}` },
     );
 
     assert.equal(response.statusCode, 500, response.body);

@@ -4,12 +4,15 @@ import { DeviceNotFoundError } from '../../services/device.service';
 import {
   addMeasurement,
   DuplicateMeasurementError,
+  latestMeasurement,
   listMeasurements,
   MeasurementDeviceNotFoundError,
+  MeasurementNotFoundError,
 } from '../../services/measurement.service';
 import { errorResponseSchema } from '../../schemas/common.schema';
 import {
   createMeasurementBodySchema,
+  latestMeasurementQuerySchema,
   listMeasurementsQuerySchema,
   listMeasurementsResponseSchema,
   measurementResponseSchema,
@@ -19,7 +22,10 @@ const measurements: FastifyPluginAsync = async (fastify) => {
   const app = fastify.withTypeProvider<ZodTypeProvider>();
 
   app.setErrorHandler((error, request, reply) => {
-    if (error instanceof DeviceNotFoundError) {
+    if (
+      error instanceof DeviceNotFoundError ||
+      error instanceof MeasurementNotFoundError
+    ) {
       return reply.code(404).send({
         statusCode: 404,
         error: 'Not Found',
@@ -106,6 +112,28 @@ const measurements: FastifyPluginAsync = async (fastify) => {
     },
     async (request) => {
       return listMeasurements(app.prisma, request.query);
+    },
+  );
+
+  app.get(
+    '/latest',
+    {
+      prefixTrailingSlash: 'no-slash',
+      schema: {
+        tags: ['Measurements'],
+        summary: 'Get latest measurement',
+        description: 'Returns the latest measurement of a device',
+        querystring: latestMeasurementQuerySchema,
+        response: {
+          200: measurementResponseSchema,
+          400: errorResponseSchema,
+          404: errorResponseSchema,
+          500: errorResponseSchema,
+        },
+      },
+    },
+    async (request) => {
+      return latestMeasurement(app.prisma, request.query);
     },
   );
 };

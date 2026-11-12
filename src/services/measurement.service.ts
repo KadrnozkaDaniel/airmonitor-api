@@ -1,6 +1,7 @@
 import { Prisma, type PrismaClient } from '../../prisma/generated/client';
 import type {
   CreateMeasurementBody,
+  LatestMeasurementQuery,
   ListMeasurementsQuery,
   ListMeasurementsResponse,
   MeasurementResponse,
@@ -42,6 +43,13 @@ export class DuplicateMeasurementError extends Error {
   constructor() {
     super('Measurement for this device and time already exists');
     this.name = 'DuplicateMeasurementError';
+  }
+}
+
+export class MeasurementNotFoundError extends Error {
+  constructor() {
+    super('Measurement does not exist');
+    this.name = 'MeasurementNotFoundError';
   }
 }
 
@@ -93,6 +101,30 @@ export const listMeasurements = async (
       totalPages: Math.ceil(total / limit),
     },
   };
+};
+
+export const latestMeasurement = async (
+  prisma: PrismaClient,
+  query: LatestMeasurementQuery,
+): Promise<MeasurementResponse> => {
+  const { deviceId } = query;
+
+  const device = await prisma.device.findUnique({
+    where: { id: deviceId },
+    select: { id: true },
+  });
+
+  if (!device) throw new DeviceNotFoundError();
+
+  const measurement = await prisma.measurement.findFirst({
+    where: { deviceId },
+    select: measurementSelect,
+    orderBy: [{ measuredAt: 'desc' }, { id: 'desc' }],
+  });
+
+  if (!measurement) throw new MeasurementNotFoundError();
+
+  return toMeasurementResponse(measurement);
 };
 
 export const addMeasurement = async (

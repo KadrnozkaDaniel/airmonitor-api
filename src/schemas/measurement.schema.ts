@@ -33,6 +33,10 @@ export const listMeasurementsQuerySchema = paginationQuerySchema
     { message: 'From must not be later than to', path: ['from'] },
   );
 
+export const latestMeasurementQuerySchema = z.strictObject({
+  deviceId: z.uuid(),
+});
+
 export const listMeasurementsResponseSchema = paginatedResponseSchema(
   measurementResponseSchema,
 );
@@ -40,6 +44,9 @@ export const listMeasurementsResponseSchema = paginatedResponseSchema(
 export type CreateMeasurementBody = z.infer<typeof createMeasurementBodySchema>;
 export type MeasurementResponse = z.infer<typeof measurementResponseSchema>;
 export type ListMeasurementsQuery = z.infer<typeof listMeasurementsQuerySchema>;
+export type LatestMeasurementQuery = z.infer<
+  typeof latestMeasurementQuerySchema
+>;
 export type ListMeasurementsResponse = z.infer<
   typeof listMeasurementsResponseSchema
 >;
