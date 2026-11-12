@@ -1,6 +1,6 @@
 import { ZodTypeProvider } from '@fastify/type-provider-zod';
 import { FastifyPluginAsync } from 'fastify';
-import { errorResponseSchema } from '../../schemas/common.schema';
+import { authErrorResponses } from '../../schemas/common.schema';
 import { meResponseSchema } from '../../schemas/me.schema';
 import { requireUser } from '../../plugins/auth';
 
@@ -17,9 +17,7 @@ const me: FastifyPluginAsync = async (fastify) => {
         summary: 'Current user',
         response: {
           200: meResponseSchema,
-          401: errorResponseSchema,
-          409: errorResponseSchema,
-          503: errorResponseSchema,
+          ...authErrorResponses,
         },
       },
     },

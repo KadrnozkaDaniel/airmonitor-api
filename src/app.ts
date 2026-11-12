@@ -8,9 +8,13 @@ import {
   serializerCompiler,
   jsonSchemaTransform,
 } from '@fastify/type-provider-zod';
+import type { AuthPluginOptions } from './plugins/auth';
 
 export interface AppOptions
-  extends FastifyServerOptions, Partial<AutoloadPluginOptions> {}
+  extends
+    FastifyServerOptions,
+    Partial<AutoloadPluginOptions>,
+    AuthPluginOptions {}
 // Pass --options via CLI arguments in command to enable these options.
 const options: AppOptions = {};
 
