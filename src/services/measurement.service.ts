@@ -53,18 +53,27 @@ export class MeasurementNotFoundError extends Error {
   }
 }
 
-export const listMeasurements = async (
+const assertDeviceOwnedBy = async (
   prisma: PrismaClient,
-  query: ListMeasurementsQuery,
-): Promise<ListMeasurementsResponse> => {
-  const { deviceId, page, limit, from, to } = query;
-
+  ownerId: string,
+  deviceId: string,
+): Promise<void> => {
   const device = await prisma.device.findUnique({
-    where: { id: deviceId },
+    where: { id: deviceId, ownerId },
     select: { id: true },
   });
 
   if (!device) throw new DeviceNotFoundError();
+};
+
+export const listMeasurements = async (
+  prisma: PrismaClient,
+  ownerId: string,
+  query: ListMeasurementsQuery,
+): Promise<ListMeasurementsResponse> => {
+  const { deviceId, page, limit, from, to } = query;
+
+  await assertDeviceOwnedBy(prisma, ownerId, deviceId);
 
   const where: Prisma.MeasurementWhereInput = {
     deviceId,
@@ -105,16 +114,12 @@ export const listMeasurements = async (
 
 export const latestMeasurement = async (
   prisma: PrismaClient,
+  ownerId: string,
   query: LatestMeasurementQuery,
 ): Promise<MeasurementResponse> => {
   const { deviceId } = query;
 
-  const device = await prisma.device.findUnique({
-    where: { id: deviceId },
-    select: { id: true },
-  });
-
-  if (!device) throw new DeviceNotFoundError();
+  await assertDeviceOwnedBy(prisma, ownerId, deviceId);
 
   const measurement = await prisma.measurement.findFirst({
     where: { deviceId },

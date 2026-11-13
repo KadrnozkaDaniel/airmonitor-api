@@ -9,7 +9,10 @@ import {
   MeasurementDeviceNotFoundError,
   MeasurementNotFoundError,
 } from '../../services/measurement.service';
-import { errorResponseSchema } from '../../schemas/common.schema';
+import {
+  authErrorResponses,
+  errorResponseSchema,
+} from '../../schemas/common.schema';
 import {
   createMeasurementBodySchema,
   latestMeasurementQuerySchema,
@@ -17,6 +20,7 @@ import {
   listMeasurementsResponseSchema,
   measurementResponseSchema,
 } from '../../schemas/measurement.schema';
+import { requireUser } from '../../plugins/auth';
 
 const measurements: FastifyPluginAsync = async (fastify) => {
   const app = fastify.withTypeProvider<ZodTypeProvider>();
@@ -53,8 +57,8 @@ const measurements: FastifyPluginAsync = async (fastify) => {
       error instanceof Error &&
       'statusCode' in error &&
       typeof error.statusCode === 'number' &&
-      error.statusCode >= 400 &&
-      error.statusCode < 500
+      ((error.statusCode >= 400 && error.statusCode < 500) ||
+        error.statusCode === 503)
     ) {
       return reply.send(error);
     }
@@ -97,21 +101,25 @@ const measurements: FastifyPluginAsync = async (fastify) => {
     '/',
     {
       prefixTrailingSlash: 'no-slash',
+      onRequest: [app.authenticate],
       schema: {
         tags: ['Measurements'],
         summary: 'Get measurements',
-        description: 'Returns a list of measurements',
+        description: 'Returns measurements of one of your devices',
         querystring: listMeasurementsQuerySchema,
+
         response: {
           200: listMeasurementsResponseSchema,
           400: errorResponseSchema,
           404: errorResponseSchema,
           500: errorResponseSchema,
+          ...authErrorResponses,
         },
       },
     },
     async (request) => {
-      return listMeasurements(app.prisma, request.query);
+      const user = requireUser(request);
+      return listMeasurements(app.prisma, user.id, request.query);
     },
   );
 
@@ -119,6 +127,7 @@ const measurements: FastifyPluginAsync = async (fastify) => {
     '/latest',
     {
       prefixTrailingSlash: 'no-slash',
+      onRequest: [app.authenticate],
       schema: {
         tags: ['Measurements'],
         summary: 'Get latest measurement',
@@ -129,11 +138,13 @@ const measurements: FastifyPluginAsync = async (fastify) => {
           400: errorResponseSchema,
           404: errorResponseSchema,
           500: errorResponseSchema,
+          ...authErrorResponses,
         },
       },
     },
     async (request) => {
-      return latestMeasurement(app.prisma, request.query);
+      const user = requireUser(request);
+      return latestMeasurement(app.prisma, user.id, request.query);
     },
   );
 };
