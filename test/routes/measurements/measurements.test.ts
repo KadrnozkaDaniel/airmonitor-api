@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { test, type TestContext } from 'node:test';
-import Fastify from 'fastify';
+import Fastify, { type FastifyRequest } from 'fastify';
 import fp from 'fastify-plugin';
 import {
   serializerCompiler,
@@ -9,6 +9,7 @@ import {
 } from '@fastify/type-provider-zod';
 import type { PrismaClient } from '../../../prisma/generated/client';
 import appPlugin from '../../../src/app';
+import type {} from '../../../src/plugins/auth';
 import type {} from '../../../src/plugins/prisma';
 import measurementRoutes from '../../../src/routes/measurements';
 import {
@@ -16,10 +17,14 @@ import {
   measurementResponseSchema,
   type MeasurementResponse,
 } from '../../../src/schemas/measurement.schema';
+import { createTestAuth, newIdentity } from '../../auth';
 
 async function setup(t: TestContext) {
   const app = Fastify();
-  const ownerId = randomUUID();
+  const auth = await createTestAuth();
+  const karel = { id: randomUUID(), ...newIdentity('karel') };
+  const jan = { id: randomUUID(), ...newIdentity('jan') };
+  const userIds = [karel.id, jan.id];
   const deviceId = randomUUID();
   const otherDeviceId = randomUUID();
   const deviceIds = [deviceId, otherDeviceId];
@@ -33,27 +38,41 @@ async function setup(t: TestContext) {
         await app.prisma.device.deleteMany({
           where: { id: { in: deviceIds } },
         });
-        await app.prisma.user.deleteMany({ where: { id: ownerId } });
+        await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
       }
     } finally {
       await app.close();
     }
   });
 
-  await app.register(fp(appPlugin));
+  await app.register(fp(appPlugin), { authJwks: auth.jwks });
   await app.ready();
-  await app.prisma.user.create({
-    data: { id: ownerId, email: `test-${ownerId}@test.cz` },
+  await app.prisma.user.createMany({
+    data: [karel, jan].map(({ id, sub, email }) => ({
+      id,
+      email,
+      keycloakSubject: sub,
+    })),
   });
   await app.prisma.device.createMany({
-    data: deviceIds.map((id) => ({ id, name: 'Test device', ownerId })),
+    data: deviceIds.map((id) => ({
+      id,
+      name: 'Test device',
+      ownerId: karel.id,
+    })),
   });
 
-  return { app, deviceId, otherDeviceId };
+  return {
+    app,
+    deviceId,
+    otherDeviceId,
+    karel: { ...karel, headers: await auth.authHeader(karel) },
+    jan: { ...jan, headers: await auth.authHeader(jan) },
+  };
 }
 
 test('POST /measurements persists a measurement and GET returns the saved data', async (t) => {
-  const { app, deviceId } = await setup(t);
+  const { app, deviceId, karel } = await setup(t);
 
   const response = await app.inject({
     method: 'POST',
@@ -97,6 +116,7 @@ test('POST /measurements persists a measurement and GET returns the saved data',
   const list = await app.inject({
     method: 'GET',
     url: `/measurements?deviceId=${deviceId}`,
+    headers: karel.headers,
   });
   assert.equal(list.statusCode, 200, list.body);
   assert.deepEqual(list.json(), {
@@ -223,7 +243,7 @@ test('POST /measurements returns 409 for a duplicate device and time', async (t)
 });
 
 test('GET /measurements returns saved measurements with serialized dates', async (t) => {
-  const { app, deviceId } = await setup(t);
+  const { app, deviceId, karel } = await setup(t);
   const measurement = await app.prisma.measurement.create({
     data: {
       deviceId,
@@ -237,6 +257,7 @@ test('GET /measurements returns saved measurements with serialized dates', async
   const response = await app.inject({
     method: 'GET',
     url: `/measurements?deviceId=${deviceId}`,
+    headers: karel.headers,
   });
 
   assert.equal(response.statusCode, 200, response.body);
@@ -258,7 +279,7 @@ test('GET /measurements returns saved measurements with serialized dates', async
 });
 
 test('GET /measurements filters devices and paginates newest measurements first', async (t) => {
-  const { app, deviceId, otherDeviceId } = await setup(t);
+  const { app, deviceId, otherDeviceId, karel } = await setup(t);
   const ids = [randomUUID(), randomUUID(), randomUUID()];
   await app.prisma.measurement.createMany({
     data: [
@@ -286,6 +307,7 @@ test('GET /measurements filters devices and paginates newest measurements first'
     const response = await app.inject({
       method: 'GET',
       url: `/measurements?deviceId=${deviceId}&page=${page}&limit=2`,
+      headers: karel.headers,
     });
 
     assert.equal(response.statusCode, 200, response.body);
@@ -301,7 +323,7 @@ test('GET /measurements filters devices and paginates newest measurements first'
 });
 
 test('GET /measurements filters by an inclusive measuredAt range', async (t) => {
-  const { app, deviceId } = await setup(t);
+  const { app, deviceId, karel } = await setup(t);
   const ids = [randomUUID(), randomUUID(), randomUUID(), randomUUID()];
   await app.prisma.measurement.createMany({
     data: ids.map((id, index) => ({
@@ -329,6 +351,7 @@ test('GET /measurements filters by an inclusive measuredAt range', async (t) => 
     const response = await app.inject({
       method: 'GET',
       url: `/measurements?deviceId=${deviceId}&${query}`,
+      headers: karel.headers,
     });
 
     assert.equal(response.statusCode, 200, `${query}: ${response.body}`);
@@ -345,10 +368,11 @@ test('GET /measurements filters by an inclusive measuredAt range', async (t) => 
 });
 
 test('GET /measurements returns an empty list for a device without measurements', async (t) => {
-  const { app, deviceId } = await setup(t);
+  const { app, deviceId, karel } = await setup(t);
   const response = await app.inject({
     method: 'GET',
     url: `/measurements?deviceId=${deviceId}`,
+    headers: karel.headers,
   });
 
   assert.equal(response.statusCode, 200, response.body);
@@ -359,7 +383,7 @@ test('GET /measurements returns an empty list for a device without measurements'
 });
 
 test('GET /measurements limits results to the default page size', async (t) => {
-  const { app, deviceId } = await setup(t);
+  const { app, deviceId, karel } = await setup(t);
   await app.prisma.measurement.createMany({
     data: Array.from({ length: 11 }, (_, index) => ({
       deviceId,
@@ -372,6 +396,7 @@ test('GET /measurements limits results to the default page size', async (t) => {
   const response = await app.inject({
     method: 'GET',
     url: `/measurements?deviceId=${deviceId}`,
+    headers: karel.headers,
   });
 
   assert.equal(response.statusCode, 200, response.body);
@@ -388,10 +413,11 @@ test('GET /measurements limits results to the default page size', async (t) => {
 });
 
 test('GET /measurements returns 404 for a nonexistent device', async (t) => {
-  const { app } = await setup(t);
+  const { app, karel } = await setup(t);
   const response = await app.inject({
     method: 'GET',
     url: `/measurements?deviceId=${randomUUID()}`,
+    headers: karel.headers,
   });
 
   assert.equal(response.statusCode, 404, response.body);
@@ -403,7 +429,7 @@ test('GET /measurements returns 404 for a nonexistent device', async (t) => {
 });
 
 test('GET /measurements rejects missing, invalid and unknown query parameters', async (t) => {
-  const { app, deviceId } = await setup(t);
+  const { app, deviceId, karel } = await setup(t);
   const invalidQueries = [
     '',
     'deviceId=invalid-uuid',
@@ -431,6 +457,7 @@ test('GET /measurements rejects missing, invalid and unknown query parameters', 
     const response = await app.inject({
       method: 'GET',
       url: `/measurements?${query}`,
+      headers: karel.headers,
     });
 
     assert.equal(response.statusCode, 400, `${query}: ${response.body}`);
@@ -441,7 +468,7 @@ test('GET /measurements rejects missing, invalid and unknown query parameters', 
 });
 
 test('GET /measurements/latest returns the newest measurement of the device', async (t) => {
-  const { app, deviceId, otherDeviceId } = await setup(t);
+  const { app, deviceId, otherDeviceId, karel } = await setup(t);
   const ids = [randomUUID(), randomUUID(), randomUUID()];
   await app.prisma.measurement.createMany({
     data: [
@@ -464,6 +491,7 @@ test('GET /measurements/latest returns the newest measurement of the device', as
   const response = await app.inject({
     method: 'GET',
     url: `/measurements/latest?deviceId=${deviceId}`,
+    headers: karel.headers,
   });
 
   assert.equal(response.statusCode, 200, response.body);
@@ -482,10 +510,11 @@ test('GET /measurements/latest returns the newest measurement of the device', as
 });
 
 test('GET /measurements/latest returns 404 for a device without measurements', async (t) => {
-  const { app, deviceId } = await setup(t);
+  const { app, deviceId, karel } = await setup(t);
   const response = await app.inject({
     method: 'GET',
     url: `/measurements/latest?deviceId=${deviceId}`,
+    headers: karel.headers,
   });
 
   assert.equal(response.statusCode, 404, response.body);
@@ -497,10 +526,11 @@ test('GET /measurements/latest returns 404 for a device without measurements', a
 });
 
 test('GET /measurements/latest returns 404 for a nonexistent device', async (t) => {
-  const { app } = await setup(t);
+  const { app, karel } = await setup(t);
   const response = await app.inject({
     method: 'GET',
     url: `/measurements/latest?deviceId=${randomUUID()}`,
+    headers: karel.headers,
   });
 
   assert.equal(response.statusCode, 404, response.body);
@@ -512,7 +542,7 @@ test('GET /measurements/latest returns 404 for a nonexistent device', async (t) 
 });
 
 test('GET /measurements/latest rejects missing, invalid and unknown query parameters', async (t) => {
-  const { app, deviceId } = await setup(t);
+  const { app, deviceId, karel } = await setup(t);
   const invalidQueries = [
     '',
     'deviceId=invalid-uuid',
@@ -525,6 +555,7 @@ test('GET /measurements/latest rejects missing, invalid and unknown query parame
     const response = await app.inject({
       method: 'GET',
       url: `/measurements/latest?${query}`,
+      headers: karel.headers,
     });
 
     assert.equal(response.statusCode, 400, `${query}: ${response.body}`);
@@ -532,6 +563,78 @@ test('GET /measurements/latest rejects missing, invalid and unknown query parame
     assert.equal(response.json().error, 'Bad Request');
     assert.doesNotMatch(response.body, /Prisma|stack/i);
   }
+});
+
+test('GET /measurements routes return 401 without a valid token', async (t) => {
+  const { app, deviceId } = await setup(t);
+
+  for (const headers of [
+    {} as Record<string, string>,
+    { authorization: 'Bearer not-a-jwt' },
+  ]) {
+    for (const url of [
+      `/measurements?deviceId=${deviceId}`,
+      `/measurements/latest?deviceId=${deviceId}`,
+    ]) {
+      const response = await app.inject({ method: 'GET', url, headers });
+      assert.equal(response.statusCode, 401, `${url}: ${response.body}`);
+      assert.equal(response.json().statusCode, 401);
+    }
+  }
+});
+
+test("GET /measurements returns 404 for another user's device", async (t) => {
+  const { app, deviceId, karel, jan } = await setup(t);
+  await app.prisma.measurement.create({
+    data: {
+      deviceId,
+      eco2: 500,
+      tvoc: 10,
+      measuredAt: new Date('2026-01-01T12:00:00.000Z'),
+    },
+  });
+
+  for (const url of [
+    `/measurements?deviceId=${deviceId}`,
+    `/measurements/latest?deviceId=${deviceId}`,
+  ]) {
+    const foreign = await app.inject({
+      method: 'GET',
+      url,
+      headers: jan.headers,
+    });
+    assert.equal(foreign.statusCode, 404, `${url}: ${foreign.body}`);
+    assert.deepEqual(foreign.json(), {
+      statusCode: 404,
+      error: 'Not Found',
+      message: 'Device does not exist',
+    });
+    assert.doesNotMatch(foreign.body, /eco2|tvoc|measuredAt/);
+
+    const own = await app.inject({
+      method: 'GET',
+      url,
+      headers: karel.headers,
+    });
+    assert.equal(own.statusCode, 200, `${url}: ${own.body}`);
+  }
+});
+
+test('POST /measurements is still accepted without a token until device keys exist', async (t) => {
+  const { app, deviceId } = await setup(t);
+
+  const response = await app.inject({
+    method: 'POST',
+    url: '/measurements',
+    payload: {
+      deviceId,
+      eco2: 450,
+      tvoc: 12,
+      measuredAt: '2026-01-01T12:00:00.000Z',
+    },
+  });
+
+  assert.equal(response.statusCode, 201, response.body);
 });
 
 for (const { method, stage } of [
@@ -563,6 +666,14 @@ for (const { method, stage } of [
       },
       $transaction: fail,
     } as unknown as PrismaClient);
+    app.decorateRequest('user', null);
+    app.decorate('authenticate', async (request: FastifyRequest) => {
+      request.user = {
+        id: randomUUID(),
+        keycloakSubject: randomUUID(),
+        email: 'stub@test.cz',
+      };
+    });
     await app.register(measurementRoutes, { prefix: '/measurements' });
 
     const response = await app.inject(
