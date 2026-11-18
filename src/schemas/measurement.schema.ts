@@ -5,7 +5,6 @@ import {
 } from './common.schema';
 
 export const createMeasurementBodySchema = z.strictObject({
-  deviceId: z.uuid(),
   eco2: z.int32().nonnegative(),
   tvoc: z.int32().nonnegative(),
   measuredAt: z.iso.datetime({ offset: true }),

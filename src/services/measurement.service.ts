@@ -32,13 +32,6 @@ const toMeasurementResponse = (
   };
 };
 
-export class MeasurementDeviceNotFoundError extends Error {
-  constructor() {
-    super('Measurement device does not exist');
-    this.name = 'MeasurementDeviceNotFoundError';
-  }
-}
-
 export class DuplicateMeasurementError extends Error {
   constructor() {
     super('Measurement for this device and time already exists');
@@ -134,12 +127,13 @@ export const latestMeasurement = async (
 
 export const addMeasurement = async (
   prisma: PrismaClient,
+  deviceId: string,
   input: CreateMeasurementBody,
 ): Promise<MeasurementResponse> => {
   try {
     const measurement = await prisma.measurement.create({
       data: {
-        deviceId: input.deviceId,
+        deviceId,
         measuredAt: input.measuredAt,
         eco2: input.eco2,
         tvoc: input.tvoc,
@@ -150,7 +144,6 @@ export const addMeasurement = async (
     return toMeasurementResponse(measurement);
   } catch (e) {
     if (e instanceof Prisma.PrismaClientKnownRequestError) {
-      if (e.code === 'P2003') throw new MeasurementDeviceNotFoundError();
       if (e.code === 'P2002') throw new DuplicateMeasurementError();
     }
     throw e;

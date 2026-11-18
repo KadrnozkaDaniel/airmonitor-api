@@ -5,9 +5,12 @@ import {
   deviceDetail,
   DeviceNotFoundError,
   listDevices,
+  rotateDeviceApiKey,
 } from '../../services/device.service';
 import {
+  apiKeyResponseSchema,
   createDeviceBodySchema,
+  createDeviceResponseSchema,
   deviceDetailParamsSchema,
   deviceResponseSchema,
   listDevicesQuerySchema,
@@ -61,7 +64,7 @@ const devices: FastifyPluginAsync = async (fastify) => {
         description: 'Creates a device owned by the authenticated user',
         body: createDeviceBodySchema,
         response: {
-          201: deviceResponseSchema,
+          201: createDeviceResponseSchema,
           400: errorResponseSchema,
           500: errorResponseSchema,
           ...authErrorResponses,
@@ -72,7 +75,36 @@ const devices: FastifyPluginAsync = async (fastify) => {
       const user = requireUser(request);
       const device = await createDevice(app.prisma, user.id, request.body);
 
-      return reply.code(201).send(device);
+      return reply.code(201).header('cache-control', 'no-store').send(device);
+    },
+  );
+
+  app.post(
+    '/:id/api-key',
+    {
+      prefixTrailingSlash: 'no-slash',
+      schema: {
+        tags: ['Devices'],
+        summary: 'Rotate device API key',
+        description: 'Generates a new API key and invalidates the old one',
+        params: deviceDetailParamsSchema,
+        response: {
+          200: apiKeyResponseSchema,
+          400: errorResponseSchema,
+          404: errorResponseSchema,
+          500: errorResponseSchema,
+          ...authErrorResponses,
+        },
+      },
+    },
+    async (request, reply) => {
+      const user = requireUser(request);
+      const apiKey = await rotateDeviceApiKey(
+        app.prisma,
+        user.id,
+        request.params.id,
+      );
+      return reply.header('cache-control', 'no-store').send(apiKey);
     },
   );
 

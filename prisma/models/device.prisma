@@ -1,9 +1,11 @@
 model Device {
-  id        String   @id @default(uuid()) @db.Uuid
-  name      String
-  ownerId   String   @db.Uuid
-  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  id          String    @id @default(uuid()) @db.Uuid
+  name        String
+  ownerId     String    @db.Uuid
+  createdAt   DateTime  @default(now()) @db.Timestamptz(3)
   description String?
+  apiKeyHash  String?   @unique
+  lastSeenAt  DateTime? @db.Timestamptz(3)
 
   owner        User          @relation(fields: [ownerId], references: [id])
   measurements Measurement[]

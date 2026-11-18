@@ -1,10 +1,13 @@
 import { Prisma, type PrismaClient } from '../../prisma/generated/client';
 import type {
+  ApiKeyResponse,
   CreateDeviceBody,
+  CreateDeviceResponse,
   DeviceResponse,
   ListDevicesQuery,
   ListDevicesResponse,
 } from '../schemas/device.schema';
+import { generateApiKey } from '../utils/api-key';
 
 type SelectedDevice = Prisma.DeviceGetPayload<{
   select: typeof deviceSelect;
@@ -16,6 +19,7 @@ const deviceSelect = {
   description: true,
   ownerId: true,
   createdAt: true,
+  lastSeenAt: true,
 } satisfies Prisma.DeviceSelect;
 
 const toDeviceResponse = (device: SelectedDevice): DeviceResponse => {
@@ -25,6 +29,7 @@ const toDeviceResponse = (device: SelectedDevice): DeviceResponse => {
     description: device.description,
     ownerId: device.ownerId,
     createdAt: device.createdAt.toISOString(),
+    lastSeenAt: device.lastSeenAt?.toISOString() ?? null,
   };
 };
 
@@ -92,15 +97,34 @@ export const createDevice = async (
   prisma: PrismaClient,
   ownerId: string,
   input: CreateDeviceBody,
-): Promise<DeviceResponse> => {
+): Promise<CreateDeviceResponse> => {
+  const { key, hash } = generateApiKey();
   const device = await prisma.device.create({
     data: {
       name: input.name,
       description: input.description ?? null,
       ownerId,
+      apiKeyHash: hash,
     },
     select: deviceSelect,
   });
 
-  return toDeviceResponse(device);
+  return { ...toDeviceResponse(device), apiKey: key };
+};
+
+export const rotateDeviceApiKey = async (
+  prisma: PrismaClient,
+  ownerId: string,
+  id: string,
+): Promise<ApiKeyResponse> => {
+  const { key, hash } = generateApiKey();
+  const { count } = await prisma.device.updateMany({
+    where: { id, ownerId },
+    data: {
+      apiKeyHash: hash,
+    },
+  });
+  if (count === 0) throw new DeviceNotFoundError();
+
+  return { apiKey: key };
 };
