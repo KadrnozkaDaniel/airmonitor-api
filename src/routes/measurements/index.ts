@@ -6,7 +6,6 @@ import {
   DuplicateMeasurementError,
   latestMeasurement,
   listMeasurements,
-  MeasurementDeviceNotFoundError,
   MeasurementNotFoundError,
 } from '../../services/measurement.service';
 import {
@@ -21,6 +20,7 @@ import {
   measurementResponseSchema,
 } from '../../schemas/measurement.schema';
 import { requireUser } from '../../plugins/auth';
+import { requireDevice } from '../../plugins/deviceAuth';
 
 const measurements: FastifyPluginAsync = async (fastify) => {
   const app = fastify.withTypeProvider<ZodTypeProvider>();
@@ -33,14 +33,6 @@ const measurements: FastifyPluginAsync = async (fastify) => {
       return reply.code(404).send({
         statusCode: 404,
         error: 'Not Found',
-        message: error.message,
-      });
-    }
-
-    if (error instanceof MeasurementDeviceNotFoundError) {
-      return reply.code(422).send({
-        statusCode: 422,
-        error: 'Unprocessable Entity',
         message: error.message,
       });
     }
@@ -76,22 +68,29 @@ const measurements: FastifyPluginAsync = async (fastify) => {
     '/',
     {
       prefixTrailingSlash: 'no-slash',
+      onRequest: [app.authenticateDevice],
       schema: {
         tags: ['Measurements'],
         summary: 'Create a measurement',
-        description: 'Creates a measurement belonging to an existing device.',
+        description:
+          'Creates a measurement for the device identified by its API key',
         body: createMeasurementBodySchema,
         response: {
           201: measurementResponseSchema,
           400: errorResponseSchema,
+          401: errorResponseSchema,
           409: errorResponseSchema,
-          422: errorResponseSchema,
           500: errorResponseSchema,
         },
       },
     },
     async (request, reply) => {
-      const measurement = await addMeasurement(app.prisma, request.body);
+      const device = requireDevice(request);
+      const measurement = await addMeasurement(
+        app.prisma,
+        device.id,
+        request.body,
+      );
 
       return reply.code(201).send(measurement);
     },

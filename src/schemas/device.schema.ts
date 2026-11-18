@@ -24,6 +24,7 @@ export const deviceResponseSchema = z.object({
   description: z.string().nullable(),
   ownerId: z.uuid(),
   createdAt: z.iso.datetime(),
+  lastSeenAt: z.iso.datetime().nullable(),
 });
 
 export const listDevicesQuerySchema = paginationQuerySchema;
@@ -35,7 +36,20 @@ export const deviceDetailParamsSchema = z.strictObject({
   id: z.uuid(),
 });
 
+export const apiKeyResponseSchema = z.object({
+  apiKey: z.string().meta({
+    description:
+      'Device API key, is shown only once, cannot be retreived again',
+  }),
+});
+
+export const createDeviceResponseSchema = deviceResponseSchema.extend(
+  apiKeyResponseSchema.shape,
+);
+
 export type CreateDeviceBody = z.infer<typeof createDeviceBodySchema>;
 export type DeviceResponse = z.infer<typeof deviceResponseSchema>;
 export type ListDevicesQuery = z.infer<typeof listDevicesQuerySchema>;
 export type ListDevicesResponse = z.infer<typeof listDevicesResponseSchema>;
+export type CreateDeviceResponse = z.infer<typeof createDeviceResponseSchema>;
+export type ApiKeyResponse = z.infer<typeof apiKeyResponseSchema>;

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { test, type TestContext } from 'node:test';
 import Fastify, { type FastifyRequest } from 'fastify';
 import fp from 'fastify-plugin';
@@ -12,8 +12,16 @@ import appPlugin from '../../../src/app';
 import type {} from '../../../src/plugins/auth';
 import type {} from '../../../src/plugins/prisma';
 import deviceRoutes from '../../../src/routes/devices';
-import type { DeviceResponse } from '../../../src/schemas/device.schema';
+import type {
+  CreateDeviceResponse,
+  DeviceResponse,
+} from '../../../src/schemas/device.schema';
 import { createTestAuth, newIdentity } from '../../auth';
+
+const sha256 = (value: string) =>
+  createHash('sha256').update(value).digest('hex');
+
+const apiKeyPattern = /^amk_[A-Za-z0-9_-]{43}$/;
 
 async function setup(t: TestContext) {
   const app = Fastify();
@@ -64,6 +72,7 @@ test('/devices routes return 401 without a valid token', async (t) => {
       { method: 'POST', url: '/devices', payload: { name: 'Kitchen' } },
       { method: 'GET', url: '/devices' },
       { method: 'GET', url: `/devices/${device.id}` },
+      { method: 'POST', url: `/devices/${device.id}/api-key` },
     ] as const) {
       const response = await app.inject({ ...request, headers });
       assert.equal(
@@ -95,11 +104,13 @@ test('POST /devices persists a device and GET returns the saved data', async (t)
 
   assert.equal(response.statusCode, 201, response.body);
   assert.match(response.headers['content-type'] ?? '', /application\/json/);
-  const body = response.json<DeviceResponse>();
+  assert.equal(response.headers['cache-control'], 'no-store');
+  const { apiKey, ...body } = response.json<CreateDeviceResponse>();
   assert.deepEqual(Object.keys(body).sort(), [
     'createdAt',
     'description',
     'id',
+    'lastSeenAt',
     'name',
     'ownerId',
   ]);
@@ -107,14 +118,18 @@ test('POST /devices persists a device and GET returns the saved data', async (t)
   assert.equal(body.name, 'Test name');
   assert.equal(body.description, 'Test description');
   assert.equal(body.ownerId, karel.id);
+  assert.equal(body.lastSeenAt, null);
   assert.equal(new Date(body.createdAt).toISOString(), body.createdAt);
+  assert.match(apiKey, apiKeyPattern);
 
-  const saved = await app.prisma.device.findUniqueOrThrow({
+  const { apiKeyHash, ...saved } = await app.prisma.device.findUniqueOrThrow({
     where: { id: body.id },
   });
+  assert.equal(apiKeyHash, sha256(apiKey));
   assert.deepEqual(body, {
     ...saved,
     createdAt: saved.createdAt.toISOString(),
+    lastSeenAt: null,
   });
 
   const list = await app.inject({
@@ -127,6 +142,46 @@ test('POST /devices persists a device and GET returns the saved data', async (t)
     data: [body],
     pagination: { page: 1, limit: 10, total: 1, totalPages: 1 },
   });
+
+  const detail = await app.inject({
+    method: 'GET',
+    url: `/devices/${body.id}`,
+    headers: karel.headers,
+  });
+  assert.equal(detail.statusCode, 200, detail.body);
+  assert.deepEqual(detail.json(), body);
+
+  for (const leaked of [list.body, detail.body]) {
+    assert.doesNotMatch(leaked, /apiKey/);
+    assert.ok(!leaked.includes(apiKey));
+    assert.ok(!leaked.includes(sha256(apiKey)));
+  }
+});
+
+test('POST /devices generates a different API key for every device', async (t) => {
+  const { app, karel } = await setup(t);
+
+  const keys = [];
+  for (let i = 0; i < 3; i++) {
+    const response = await app.inject({
+      method: 'POST',
+      url: '/devices',
+      headers: karel.headers,
+      payload: { name: 'Bedroom' },
+    });
+    assert.equal(response.statusCode, 201, response.body);
+    keys.push(response.json<CreateDeviceResponse>().apiKey);
+  }
+
+  assert.equal(new Set(keys).size, keys.length);
+  const hashes = await app.prisma.device.findMany({
+    where: { ownerId: karel.id },
+    select: { apiKeyHash: true },
+  });
+  assert.deepEqual(
+    hashes.map((device) => device.apiKeyHash).sort(),
+    keys.map(sha256).sort(),
+  );
 });
 
 test('POST /devices accepts omitted/null descriptions and duplicate names', async (t) => {
@@ -243,6 +298,7 @@ test('GET /devices/:id returns the requested device with a serialized date', asy
   assert.deepEqual(response.json(), {
     ...device,
     createdAt: device.createdAt.toISOString(),
+    lastSeenAt: null,
   });
 });
 
@@ -288,6 +344,98 @@ test("GET /devices/:id returns 404 for another user's device", async (t) => {
     headers: jan.headers,
   });
   assert.equal(own.statusCode, 200, own.body);
+});
+
+test('POST /devices/:id/api-key replaces the key and returns the new one', async (t) => {
+  const { app, karel } = await setup(t);
+  const created = await app.inject({
+    method: 'POST',
+    url: '/devices',
+    headers: karel.headers,
+    payload: { name: 'Kitchen' },
+  });
+  assert.equal(created.statusCode, 201, created.body);
+  const { id, apiKey: oldKey } = created.json<CreateDeviceResponse>();
+
+  const response = await app.inject({
+    method: 'POST',
+    url: `/devices/${id}/api-key`,
+    headers: karel.headers,
+  });
+
+  assert.equal(response.statusCode, 200, response.body);
+  assert.equal(response.headers['cache-control'], 'no-store');
+  const body = response.json();
+  assert.deepEqual(Object.keys(body), ['apiKey']);
+  assert.match(body.apiKey, apiKeyPattern);
+  assert.notEqual(body.apiKey, oldKey);
+
+  const saved = await app.prisma.device.findUniqueOrThrow({ where: { id } });
+  assert.equal(saved.apiKeyHash, sha256(body.apiKey));
+});
+
+test('POST /devices/:id/api-key adds a key to a device that has none', async (t) => {
+  const { app, karel } = await setup(t);
+  const device = await app.prisma.device.create({
+    data: { name: 'Legacy device', ownerId: karel.id },
+  });
+  assert.equal(device.apiKeyHash, null);
+
+  const response = await app.inject({
+    method: 'POST',
+    url: `/devices/${device.id}/api-key`,
+    headers: karel.headers,
+  });
+
+  assert.equal(response.statusCode, 200, response.body);
+  const saved = await app.prisma.device.findUniqueOrThrow({
+    where: { id: device.id },
+  });
+  assert.equal(saved.apiKeyHash, sha256(response.json().apiKey));
+});
+
+test("POST /devices/:id/api-key returns 404 for another user's or a nonexistent device", async (t) => {
+  const { app, karel, jan } = await setup(t);
+  const original = sha256('amk_original');
+  const device = await app.prisma.device.create({
+    data: { name: 'Kitchen', ownerId: karel.id, apiKeyHash: original },
+  });
+
+  for (const [headers, id] of [
+    [jan.headers, device.id],
+    [karel.headers, randomUUID()],
+  ] as const) {
+    const response = await app.inject({
+      method: 'POST',
+      url: `/devices/${id}/api-key`,
+      headers,
+    });
+    assert.equal(response.statusCode, 404, response.body);
+    assert.deepEqual(response.json(), {
+      statusCode: 404,
+      error: 'Not Found',
+      message: 'Device does not exist',
+    });
+    assert.doesNotMatch(response.body, /amk_/);
+  }
+
+  const saved = await app.prisma.device.findUniqueOrThrow({
+    where: { id: device.id },
+  });
+  assert.equal(saved.apiKeyHash, original);
+});
+
+test('POST /devices/:id/api-key rejects invalid UUIDs', async (t) => {
+  const { app, karel } = await setup(t);
+
+  for (const id of ['invalid-uuid', '123']) {
+    const response = await app.inject({
+      method: 'POST',
+      url: `/devices/${id}/api-key`,
+      headers: karel.headers,
+    });
+    assert.equal(response.statusCode, 400, `${id}: ${response.body}`);
+  }
 });
 
 test('GET /devices/:id rejects invalid UUIDs', async (t) => {
@@ -443,6 +591,7 @@ for (const { method, url } of [
   { method: 'POST', url: '/devices' },
   { method: 'GET', url: '/devices' },
   { method: 'GET', url: `/devices/${randomUUID()}` },
+  { method: 'POST', url: `/devices/${randomUUID()}/api-key` },
 ] as const) {
   test(`${method} ${url} hides unexpected database errors`, async (t) => {
     const app = Fastify();
@@ -457,6 +606,7 @@ for (const { method, url } of [
       device: {
         create: fail,
         findUnique: fail,
+        updateMany: fail,
         findMany: async () => [],
         count: async () => 0,
       },
@@ -477,7 +627,9 @@ for (const { method, url } of [
     const response = await app.inject({
       method,
       url,
-      ...(method === 'POST' ? { payload: { name: 'Kitchen' } } : {}),
+      ...(url === '/devices' && method === 'POST'
+        ? { payload: { name: 'Kitchen' } }
+        : {}),
     });
 
     assert.equal(response.statusCode, 500, response.body);

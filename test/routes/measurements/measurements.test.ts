@@ -10,6 +10,7 @@ import {
 import type { PrismaClient } from '../../../prisma/generated/client';
 import appPlugin from '../../../src/app';
 import type {} from '../../../src/plugins/auth';
+import type {} from '../../../src/plugins/deviceAuth';
 import type {} from '../../../src/plugins/prisma';
 import measurementRoutes from '../../../src/routes/measurements';
 import {
@@ -17,7 +18,10 @@ import {
   measurementResponseSchema,
   type MeasurementResponse,
 } from '../../../src/schemas/measurement.schema';
+import { generateApiKey } from '../../../src/utils/api-key';
 import { createTestAuth, newIdentity } from '../../auth';
+
+const deviceHeaders = (key: string) => ({ authorization: `Bearer ${key}` });
 
 async function setup(t: TestContext) {
   const app = Fastify();
@@ -27,16 +31,17 @@ async function setup(t: TestContext) {
   const userIds = [karel.id, jan.id];
   const deviceId = randomUUID();
   const otherDeviceId = randomUUID();
-  const deviceIds = [deviceId, otherDeviceId];
+  const deviceKey = generateApiKey();
+  const otherDeviceKey = generateApiKey();
 
   t.after(async () => {
     try {
       if (app.hasDecorator('prisma')) {
         await app.prisma.measurement.deleteMany({
-          where: { deviceId: { in: deviceIds } },
+          where: { device: { ownerId: { in: userIds } } },
         });
         await app.prisma.device.deleteMany({
-          where: { id: { in: deviceIds } },
+          where: { ownerId: { in: userIds } },
         });
         await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
       }
@@ -55,8 +60,11 @@ async function setup(t: TestContext) {
     })),
   });
   await app.prisma.device.createMany({
-    data: deviceIds.map((id) => ({
-      id,
+    data: [
+      { id: deviceId, apiKeyHash: deviceKey.hash },
+      { id: otherDeviceId, apiKeyHash: otherDeviceKey.hash },
+    ].map((device) => ({
+      ...device,
       name: 'Test device',
       ownerId: karel.id,
     })),
@@ -66,19 +74,21 @@ async function setup(t: TestContext) {
     app,
     deviceId,
     otherDeviceId,
+    device: deviceHeaders(deviceKey.key),
+    otherDevice: deviceHeaders(otherDeviceKey.key),
     karel: { ...karel, headers: await auth.authHeader(karel) },
     jan: { ...jan, headers: await auth.authHeader(jan) },
   };
 }
 
 test('POST /measurements persists a measurement and GET returns the saved data', async (t) => {
-  const { app, deviceId, karel } = await setup(t);
+  const { app, deviceId, device, karel } = await setup(t);
 
   const response = await app.inject({
     method: 'POST',
     url: '/measurements',
+    headers: device,
     payload: {
-      deviceId,
       eco2: 450,
       tvoc: 12,
       measuredAt: '2026-01-01T13:00:00.000+01:00',
@@ -126,20 +136,19 @@ test('POST /measurements persists a measurement and GET returns the saved data',
 });
 
 test('POST /measurements rejects invalid bodies without writing to the database', async (t) => {
-  const { app, deviceId } = await setup(t);
+  const { app, deviceId, otherDeviceId, device } = await setup(t);
   const valid = {
-    deviceId,
     eco2: 450,
     tvoc: 12,
     measuredAt: '2026-01-01T12:00:00.000Z',
   };
   const invalidBodies = [
     {},
-    { eco2: 450, tvoc: 12, measuredAt: valid.measuredAt },
-    { deviceId, tvoc: 12, measuredAt: valid.measuredAt },
-    { deviceId, eco2: 450, measuredAt: valid.measuredAt },
-    { deviceId, eco2: 450, tvoc: 12 },
-    { ...valid, deviceId: 'invalid-uuid' },
+    { tvoc: 12, measuredAt: valid.measuredAt },
+    { eco2: 450, measuredAt: valid.measuredAt },
+    { eco2: 450, tvoc: 12 },
+    { ...valid, deviceId },
+    { ...valid, deviceId: otherDeviceId },
     { ...valid, eco2: 1.5 },
     { ...valid, eco2: '450' },
     { ...valid, eco2: null },
@@ -155,6 +164,7 @@ test('POST /measurements rejects invalid bodies without writing to the database'
     const response = await app.inject({
       method: 'POST',
       url: '/measurements',
+      headers: device,
       payload,
     });
     assert.equal(
@@ -166,43 +176,171 @@ test('POST /measurements rejects invalid bodies without writing to the database'
     assert.equal(response.json().error, 'Bad Request');
   }
 
-  assert.equal(await app.prisma.measurement.count({ where: { deviceId } }), 0);
+  assert.equal(
+    await app.prisma.measurement.count({
+      where: { deviceId: { in: [deviceId, otherDeviceId] } },
+    }),
+    0,
+  );
 });
 
-test('POST /measurements returns 422 for a nonexistent device', async (t) => {
-  const { app } = await setup(t);
-  const missingDeviceId = randomUUID();
+test('POST /measurements returns 401 without a valid device key', async (t) => {
+  const { app, deviceId, otherDeviceId, device, karel } = await setup(t);
+  const deviceKey = device.authorization.slice('Bearer '.length);
+  const legacyDeviceId = randomUUID();
+  await app.prisma.device.create({
+    data: { id: legacyDeviceId, name: 'Legacy device', ownerId: karel.id },
+  });
+
+  const cases: [string, Record<string, string>][] = [
+    ['missing header', {}],
+    ['basic auth', { authorization: `Basic ${deviceKey}` }],
+    ['empty bearer', { authorization: 'Bearer ' }],
+    ['raw key without bearer', { authorization: deviceKey }],
+    ['unknown key', deviceHeaders(generateApiKey().key)],
+    ['key without prefix', deviceHeaders(deviceKey.slice('amk_'.length))],
+    ['tampered key', deviceHeaders(`${deviceKey}x`)],
+    ['stored hash as key', deviceHeaders(generateApiKey().hash)],
+    ['user token', karel.headers],
+  ];
+
+  for (const [label, headers] of cases) {
+    const response = await app.inject({
+      method: 'POST',
+      url: '/measurements',
+      headers,
+      payload: {
+        eco2: 450,
+        tvoc: 12,
+        measuredAt: '2026-01-01T12:00:00.000Z',
+      },
+    });
+    assert.equal(response.statusCode, 401, `${label}: ${response.body}`);
+    assert.equal(response.json().statusCode, 401, label);
+    assert.doesNotMatch(response.body, /amk_|Prisma|stack/i, label);
+  }
+
+  assert.equal(
+    await app.prisma.measurement.count({
+      where: { deviceId: { in: [deviceId, otherDeviceId, legacyDeviceId] } },
+    }),
+    0,
+  );
+  const devices = await app.prisma.device.findMany({
+    where: { id: { in: [deviceId, otherDeviceId, legacyDeviceId] } },
+  });
+  assert.ok(devices.every((saved) => saved.lastSeenAt === null));
+});
+
+test('POST /measurements stores the measurement under the device of the key', async (t) => {
+  const { app, deviceId, otherDeviceId, otherDevice } = await setup(t);
 
   const response = await app.inject({
     method: 'POST',
     url: '/measurements',
+    headers: otherDevice,
     payload: {
-      deviceId: missingDeviceId,
       eco2: 450,
       tvoc: 12,
       measuredAt: '2026-01-01T12:00:00.000Z',
     },
   });
 
-  assert.equal(response.statusCode, 422, response.body);
-  assert.deepEqual(response.json(), {
-    statusCode: 422,
-    error: 'Unprocessable Entity',
-    message: 'Measurement device does not exist',
+  assert.equal(response.statusCode, 201, response.body);
+  const saved = await app.prisma.measurement.findUniqueOrThrow({
+    where: { id: response.json().id },
   });
-  assert.doesNotMatch(response.body, /Prisma|P2003|foreign key|stack/i);
-  assert.equal(
-    await app.prisma.measurement.count({
-      where: { deviceId: missingDeviceId },
-    }),
-    0,
+  assert.equal(saved.deviceId, otherDeviceId);
+  assert.equal(await app.prisma.measurement.count({ where: { deviceId } }), 0);
+});
+
+test('POST /measurements updates lastSeenAt of the device', async (t) => {
+  const { app, deviceId, otherDeviceId, device, karel } = await setup(t);
+
+  const before = new Date();
+  const response = await app.inject({
+    method: 'POST',
+    url: '/measurements',
+    headers: device,
+    payload: {
+      eco2: 450,
+      tvoc: 12,
+      measuredAt: '2026-01-01T12:00:00.000Z',
+    },
+  });
+  const after = new Date();
+  assert.equal(response.statusCode, 201, response.body);
+
+  const saved = await app.prisma.device.findUniqueOrThrow({
+    where: { id: deviceId },
+  });
+  assert.ok(saved.lastSeenAt, 'lastSeenAt should be set');
+  assert.ok(saved.lastSeenAt >= new Date(before.getTime() - 1));
+  assert.ok(saved.lastSeenAt <= after);
+
+  const other = await app.prisma.device.findUniqueOrThrow({
+    where: { id: otherDeviceId },
+  });
+  assert.equal(other.lastSeenAt, null);
+
+  const detail = await app.inject({
+    method: 'GET',
+    url: `/devices/${deviceId}`,
+    headers: karel.headers,
+  });
+  assert.equal(detail.statusCode, 200, detail.body);
+  assert.equal(detail.json().lastSeenAt, saved.lastSeenAt.toISOString());
+});
+
+test('POST /measurements rejects the old key after rotation and accepts the new one', async (t) => {
+  const { app, deviceId, device, karel } = await setup(t);
+  const payload = { eco2: 450, tvoc: 12 };
+
+  const beforeRotation = await app.inject({
+    method: 'POST',
+    url: '/measurements',
+    headers: device,
+    payload: { ...payload, measuredAt: '2026-01-01T12:00:00.000Z' },
+  });
+  assert.equal(beforeRotation.statusCode, 201, beforeRotation.body);
+
+  const rotation = await app.inject({
+    method: 'POST',
+    url: `/devices/${deviceId}/api-key`,
+    headers: karel.headers,
+  });
+  assert.equal(rotation.statusCode, 200, rotation.body);
+  const { apiKey } = rotation.json();
+
+  const oldKey = await app.inject({
+    method: 'POST',
+    url: '/measurements',
+    headers: device,
+    payload: { ...payload, measuredAt: '2026-01-01T12:01:00.000Z' },
+  });
+  assert.equal(oldKey.statusCode, 401, oldKey.body);
+
+  const newKey = await app.inject({
+    method: 'POST',
+    url: '/measurements',
+    headers: deviceHeaders(apiKey),
+    payload: { ...payload, measuredAt: '2026-01-01T12:02:00.000Z' },
+  });
+  assert.equal(newKey.statusCode, 201, newKey.body);
+
+  const saved = await app.prisma.measurement.findMany({
+    where: { deviceId },
+    orderBy: { measuredAt: 'asc' },
+  });
+  assert.deepEqual(
+    saved.map((measurement) => measurement.measuredAt.toISOString()),
+    ['2026-01-01T12:00:00.000Z', '2026-01-01T12:02:00.000Z'],
   );
 });
 
 test('POST /measurements returns 409 for a duplicate device and time', async (t) => {
-  const { app, deviceId, otherDeviceId } = await setup(t);
+  const { app, deviceId, device, otherDevice } = await setup(t);
   const payload = {
-    deviceId,
     eco2: 450,
     tvoc: 12,
     measuredAt: '2026-01-01T12:00:00.000Z',
@@ -211,6 +349,7 @@ test('POST /measurements returns 409 for a duplicate device and time', async (t)
   const first = await app.inject({
     method: 'POST',
     url: '/measurements',
+    headers: device,
     payload,
   });
   assert.equal(first.statusCode, 201, first.body);
@@ -219,6 +358,7 @@ test('POST /measurements returns 409 for a duplicate device and time', async (t)
   const duplicate = await app.inject({
     method: 'POST',
     url: '/measurements',
+    headers: device,
     payload: { ...payload, eco2: 999, measuredAt: '2026-01-01T13:00:00+01:00' },
   });
 
@@ -234,12 +374,13 @@ test('POST /measurements returns 409 for a duplicate device and time', async (t)
   assert.equal(saved.length, 1);
   assert.equal(saved[0].eco2, 450);
 
-  const otherDevice = await app.inject({
+  const fromOtherDevice = await app.inject({
     method: 'POST',
     url: '/measurements',
-    payload: { ...payload, deviceId: otherDeviceId },
+    headers: otherDevice,
+    payload,
   });
-  assert.equal(otherDevice.statusCode, 201, otherDevice.body);
+  assert.equal(fromOtherDevice.statusCode, 201, fromOtherDevice.body);
 });
 
 test('GET /measurements returns saved measurements with serialized dates', async (t) => {
@@ -620,23 +761,6 @@ test("GET /measurements returns 404 for another user's device", async (t) => {
   }
 });
 
-test('POST /measurements is still accepted without a token until device keys exist', async (t) => {
-  const { app, deviceId } = await setup(t);
-
-  const response = await app.inject({
-    method: 'POST',
-    url: '/measurements',
-    payload: {
-      deviceId,
-      eco2: 450,
-      tvoc: 12,
-      measuredAt: '2026-01-01T12:00:00.000Z',
-    },
-  });
-
-  assert.equal(response.statusCode, 201, response.body);
-});
-
 for (const { method, stage } of [
   { method: 'POST', stage: 'measurement create' },
   { method: 'GET', stage: 'device lookup' },
@@ -666,6 +790,10 @@ for (const { method, stage } of [
       },
       $transaction: fail,
     } as unknown as PrismaClient);
+    app.decorateRequest('device', null);
+    app.decorate('authenticateDevice', async (request: FastifyRequest) => {
+      request.device = { id: deviceId, ownerId: randomUUID() };
+    });
     app.decorateRequest('user', null);
     app.decorate('authenticate', async (request: FastifyRequest) => {
       request.user = {
@@ -682,7 +810,6 @@ for (const { method, stage } of [
             method,
             url: '/measurements',
             payload: {
-              deviceId,
               eco2: 450,
               tvoc: 12,
               measuredAt: '2026-01-01T12:00:00.000Z',
