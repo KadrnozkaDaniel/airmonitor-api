@@ -16,12 +16,32 @@ import measurementRoutes from '../../../src/routes/measurements';
 import {
   listMeasurementsResponseSchema,
   measurementResponseSchema,
-  type MeasurementResponse,
 } from '../../../src/schemas/measurement.schema';
 import { generateApiKey } from '../../../src/utils/api-key';
+import {
+  ECO2_MAX,
+  ECO2_MIN,
+  MAX_BATCH_SIZE,
+  MAX_CLOCK_SKEW_MS,
+  MAX_MEASUREMENT_AGE_MS,
+  TVOC_MAX,
+} from '../../../src/utils/constants';
 import { createTestAuth, newIdentity } from '../../auth';
 
 const deviceHeaders = (key: string) => ({ authorization: `Bearer ${key}` });
+
+const minutesAgo = (minutes: number) =>
+  new Date(Date.now() - minutes * 60_000).toISOString();
+
+const withOffset = (iso: string) =>
+  new Date(Date.parse(iso) + 60 * 60_000).toISOString().replace('Z', '+01:00');
+
+const reading = (minutes: number, overrides: Record<string, unknown> = {}) => ({
+  eco2: 450,
+  tvoc: 12,
+  measuredAt: minutesAgo(minutes),
+  ...overrides,
+});
 
 async function setup(t: TestContext) {
   const app = Fastify();
@@ -81,47 +101,52 @@ async function setup(t: TestContext) {
   };
 }
 
-test('POST /measurements persists a measurement and GET returns the saved data', async (t) => {
-  const { app, deviceId, device, karel } = await setup(t);
-
-  const response = await app.inject({
+const ingest = (
+  app: Awaited<ReturnType<typeof setup>>['app'],
+  headers: Record<string, string>,
+  payload: unknown,
+) =>
+  app.inject({
     method: 'POST',
     url: '/measurements',
-    headers: device,
-    payload: {
-      eco2: 450,
-      tvoc: 12,
-      measuredAt: '2026-01-01T13:00:00.000+01:00',
-    },
+    headers,
+    payload: payload as Record<string, unknown>,
   });
 
-  assert.equal(response.statusCode, 201, response.body);
+test('POST /measurements stores a batch and GET returns the saved data', async (t) => {
+  const { app, deviceId, device, karel } = await setup(t);
+  const measurements = [
+    reading(3, { eco2: 500, tvoc: 10 }),
+    reading(2, { eco2: 600, tvoc: 20 }),
+    { eco2: 700, tvoc: 30, measuredAt: withOffset(minutesAgo(1)) },
+  ];
+
+  const response = await ingest(app, device, { measurements });
+
+  assert.equal(response.statusCode, 200, response.body);
   assert.match(response.headers['content-type'] ?? '', /application\/json/);
-  const body = response.json<MeasurementResponse>();
-  assert.deepEqual(Object.keys(body).sort(), [
-    'eco2',
-    'id',
-    'measuredAt',
-    'receivedAt',
-    'tvoc',
-  ]);
-  assert.match(body.id, /^[0-9a-f-]{36}$/i);
-  assert.equal(body.eco2, 450);
-  assert.equal(body.tvoc, 12);
-  assert.equal(body.measuredAt, '2026-01-01T12:00:00.000Z');
-  assert.equal(new Date(body.receivedAt).toISOString(), body.receivedAt);
+  assert.deepEqual(response.json(), {
+    received: 3,
+    inserted: 3,
+    duplicates: 0,
+  });
 
-  const saved = await app.prisma.measurement.findUniqueOrThrow({
-    where: { id: body.id },
+  const saved = await app.prisma.measurement.findMany({
+    where: { deviceId },
+    orderBy: { measuredAt: 'asc' },
   });
-  assert.equal(saved.deviceId, deviceId);
-  assert.deepEqual(body, {
-    id: saved.id,
-    eco2: saved.eco2,
-    tvoc: saved.tvoc,
-    measuredAt: saved.measuredAt.toISOString(),
-    receivedAt: saved.receivedAt.toISOString(),
-  });
+  assert.deepEqual(
+    saved.map(({ eco2, tvoc, measuredAt }) => ({
+      eco2,
+      tvoc,
+      measuredAt: measuredAt.toISOString(),
+    })),
+    measurements.map(({ eco2, tvoc, measuredAt }) => ({
+      eco2,
+      tvoc,
+      measuredAt: new Date(measuredAt).toISOString(),
+    })),
+  );
 
   const list = await app.inject({
     method: 'GET',
@@ -129,51 +154,185 @@ test('POST /measurements persists a measurement and GET returns the saved data',
     headers: karel.headers,
   });
   assert.equal(list.statusCode, 200, list.body);
-  assert.deepEqual(list.json(), {
-    data: [body],
-    pagination: { page: 1, limit: 10, total: 1, totalPages: 1 },
-  });
+  const { data, pagination } = listMeasurementsResponseSchema.parse(
+    list.json(),
+  );
+  assert.deepEqual(
+    data.map((measurement) => measurement.eco2),
+    [700, 600, 500],
+  );
+  assert.equal(pagination.total, 3);
 });
 
-test('POST /measurements rejects invalid bodies without writing to the database', async (t) => {
+test('POST /measurements is idempotent when the same batch is sent again', async (t) => {
+  const { app, deviceId, device } = await setup(t);
+  const measurements = [reading(3), reading(2), reading(1)];
+
+  const first = await ingest(app, device, { measurements });
+  assert.equal(first.statusCode, 200, first.body);
+  assert.deepEqual(first.json(), { received: 3, inserted: 3, duplicates: 0 });
+
+  const retry = await ingest(app, device, { measurements });
+  assert.equal(retry.statusCode, 200, retry.body);
+  assert.deepEqual(retry.json(), { received: 3, inserted: 0, duplicates: 3 });
+
+  const changed = await ingest(app, device, {
+    measurements: measurements.map((measurement) => ({
+      ...measurement,
+      eco2: 999,
+    })),
+  });
+  assert.equal(changed.statusCode, 200, changed.body);
+  assert.deepEqual(changed.json(), {
+    received: 3,
+    inserted: 0,
+    duplicates: 3,
+  });
+
+  const saved = await app.prisma.measurement.findMany({ where: { deviceId } });
+  assert.equal(saved.length, 3);
+  assert.ok(saved.every((measurement) => measurement.eco2 === 450));
+});
+
+test('POST /measurements stores only new measurements from an overlapping batch', async (t) => {
+  const { app, deviceId, device, otherDevice } = await setup(t);
+  const [older, middle, newest] = [minutesAgo(3), minutesAgo(2), minutesAgo(1)];
+
+  const first = await ingest(app, device, {
+    measurements: [
+      { eco2: 450, tvoc: 12, measuredAt: older },
+      { eco2: 450, tvoc: 12, measuredAt: middle },
+    ],
+  });
+  assert.equal(first.statusCode, 200, first.body);
+
+  const overlapping = await ingest(app, device, {
+    measurements: [
+      { eco2: 450, tvoc: 12, measuredAt: withOffset(middle) },
+      { eco2: 450, tvoc: 12, measuredAt: newest },
+    ],
+  });
+  assert.equal(overlapping.statusCode, 200, overlapping.body);
+  assert.deepEqual(overlapping.json(), {
+    received: 2,
+    inserted: 1,
+    duplicates: 1,
+  });
+  assert.equal(await app.prisma.measurement.count({ where: { deviceId } }), 3);
+
+  const fromOtherDevice = await ingest(app, otherDevice, {
+    measurements: [{ eco2: 450, tvoc: 12, measuredAt: middle }],
+  });
+  assert.equal(fromOtherDevice.statusCode, 200, fromOtherDevice.body);
+  assert.equal(fromOtherDevice.json().inserted, 1);
+});
+
+test('POST /measurements accepts values and times at their limits', async (t) => {
+  const { app, deviceId, device } = await setup(t);
+  const skewMinutes = MAX_CLOCK_SKEW_MS / 60_000;
+  const maxAgeMinutes = MAX_MEASUREMENT_AGE_MS / 60_000;
+
+  const response = await ingest(app, device, {
+    measurements: [
+      reading(4, { eco2: ECO2_MIN, tvoc: 0 }),
+      reading(3, { eco2: ECO2_MAX, tvoc: TVOC_MAX }),
+      reading(-(skewMinutes - 1)),
+      reading(maxAgeMinutes - 60),
+    ],
+  });
+
+  assert.equal(response.statusCode, 200, response.body);
+  assert.deepEqual(response.json(), {
+    received: 4,
+    inserted: 4,
+    duplicates: 0,
+  });
+  assert.equal(await app.prisma.measurement.count({ where: { deviceId } }), 4);
+});
+
+test('POST /measurements accepts a batch of the maximum size', async (t) => {
+  const { app, deviceId, device } = await setup(t);
+
+  const response = await ingest(app, device, {
+    measurements: Array.from({ length: MAX_BATCH_SIZE }, (_, index) =>
+      reading(index + 1),
+    ),
+  });
+
+  assert.equal(response.statusCode, 200, response.body);
+  assert.deepEqual(response.json(), {
+    received: MAX_BATCH_SIZE,
+    inserted: MAX_BATCH_SIZE,
+    duplicates: 0,
+  });
+  assert.equal(
+    await app.prisma.measurement.count({ where: { deviceId } }),
+    MAX_BATCH_SIZE,
+  );
+});
+
+test('POST /measurements rejects invalid batches without writing to the database', async (t) => {
   const { app, deviceId, otherDeviceId, device } = await setup(t);
-  const valid = {
-    eco2: 450,
-    tvoc: 12,
-    measuredAt: '2026-01-01T12:00:00.000Z',
-  };
-  const invalidBodies = [
-    {},
-    { tvoc: 12, measuredAt: valid.measuredAt },
-    { eco2: 450, measuredAt: valid.measuredAt },
-    { eco2: 450, tvoc: 12 },
-    { ...valid, deviceId },
-    { ...valid, deviceId: otherDeviceId },
-    { ...valid, eco2: 1.5 },
-    { ...valid, eco2: '450' },
-    { ...valid, eco2: null },
-    { ...valid, tvoc: 1.5 },
-    { ...valid, tvoc: 2 ** 31 },
-    { ...valid, measuredAt: 'not-a-date' },
-    { ...valid, measuredAt: '2026-01-01' },
-    { ...valid, id: randomUUID() },
-    { ...valid, receivedAt: new Date().toISOString() },
+  const valid = reading(1);
+  const skewMinutes = MAX_CLOCK_SKEW_MS / 60_000;
+  const maxAgeMinutes = MAX_MEASUREMENT_AGE_MS / 60_000;
+  const batch = (...items: unknown[]) => ({ measurements: items });
+
+  const cases: [string, unknown][] = [
+    ['empty body', {}],
+    ['single measurement without batch', valid],
+    ['empty batch', batch()],
+    ['measurements is not an array', { measurements: valid }],
+    [
+      'batch over the limit',
+      {
+        measurements: Array.from({ length: MAX_BATCH_SIZE + 1 }, (_, index) =>
+          reading(index + 1),
+        ),
+      },
+    ],
+    ['unknown top-level field', { ...batch(valid), deviceId }],
+    ['missing eco2', batch({ tvoc: 12, measuredAt: valid.measuredAt })],
+    ['missing tvoc', batch({ eco2: 450, measuredAt: valid.measuredAt })],
+    ['missing measuredAt', batch({ eco2: 450, tvoc: 12 })],
+    ['eco2 below range', batch(reading(1, { eco2: ECO2_MIN - 1 }))],
+    ['eco2 above range', batch(reading(1, { eco2: ECO2_MAX + 1 }))],
+    ['eco2 not an integer', batch(reading(1, { eco2: 450.5 }))],
+    ['eco2 as string', batch(reading(1, { eco2: '450' }))],
+    ['eco2 null', batch(reading(1, { eco2: null }))],
+    ['tvoc negative', batch(reading(1, { tvoc: -1 }))],
+    ['tvoc above range', batch(reading(1, { tvoc: TVOC_MAX + 1 }))],
+    ['measuredAt invalid', batch(reading(1, { measuredAt: 'not-a-date' }))],
+    ['measuredAt date only', batch(reading(1, { measuredAt: '2026-01-01' }))],
+    ['measuredAt in the future', batch(reading(-(skewMinutes + 1)))],
+    ['measuredAt too old', batch(reading(maxAgeMinutes + 60))],
+    [
+      'measuredAt from 1970',
+      batch(reading(1, { measuredAt: new Date(0).toISOString() })),
+    ],
+    ['deviceId in measurement', batch(reading(1, { deviceId: otherDeviceId }))],
+    ['id in measurement', batch(reading(1, { id: randomUUID() }))],
+    [
+      'receivedAt in measurement',
+      batch(reading(1, { receivedAt: new Date().toISOString() })),
+    ],
+    ['duplicate measuredAt in batch', batch(valid, { ...valid, eco2: 999 })],
+    [
+      'duplicate instant with another offset',
+      batch(valid, { ...valid, measuredAt: withOffset(valid.measuredAt) }),
+    ],
+    [
+      'one invalid item among valid ones',
+      batch(reading(3), reading(2, { eco2: 1 })),
+    ],
   ];
 
-  for (const payload of invalidBodies) {
-    const response = await app.inject({
-      method: 'POST',
-      url: '/measurements',
-      headers: device,
-      payload,
-    });
-    assert.equal(
-      response.statusCode,
-      400,
-      `${JSON.stringify(payload)}: ${response.body}`,
-    );
-    assert.equal(response.json().statusCode, 400);
-    assert.equal(response.json().error, 'Bad Request');
+  for (const [label, payload] of cases) {
+    const response = await ingest(app, device, payload);
+    assert.equal(response.statusCode, 400, `${label}: ${response.body}`);
+    assert.equal(response.json().statusCode, 400, label);
+    assert.equal(response.json().error, 'Bad Request', label);
+    assert.doesNotMatch(response.body, /Prisma|stack/i, label);
   }
 
   assert.equal(
@@ -182,6 +341,18 @@ test('POST /measurements rejects invalid bodies without writing to the database'
     }),
     0,
   );
+});
+
+test('POST /measurements rejects bodies over the size limit', async (t) => {
+  const { app, deviceId, device } = await setup(t);
+
+  const response = await ingest(app, device, {
+    measurements: [reading(1, { note: 'x'.repeat(300 * 1024) })],
+  });
+
+  assert.equal(response.statusCode, 413, response.body);
+  assert.equal(response.json().statusCode, 413);
+  assert.equal(await app.prisma.measurement.count({ where: { deviceId } }), 0);
 });
 
 test('POST /measurements returns 401 without a valid device key', async (t) => {
@@ -205,15 +376,8 @@ test('POST /measurements returns 401 without a valid device key', async (t) => {
   ];
 
   for (const [label, headers] of cases) {
-    const response = await app.inject({
-      method: 'POST',
-      url: '/measurements',
-      headers,
-      payload: {
-        eco2: 450,
-        tvoc: 12,
-        measuredAt: '2026-01-01T12:00:00.000Z',
-      },
+    const response = await ingest(app, headers, {
+      measurements: [reading(1)],
     });
     assert.equal(response.statusCode, 401, `${label}: ${response.body}`);
     assert.equal(response.json().statusCode, 401, label);
@@ -232,25 +396,18 @@ test('POST /measurements returns 401 without a valid device key', async (t) => {
   assert.ok(devices.every((saved) => saved.lastSeenAt === null));
 });
 
-test('POST /measurements stores the measurement under the device of the key', async (t) => {
+test('POST /measurements stores the batch under the device of the key', async (t) => {
   const { app, deviceId, otherDeviceId, otherDevice } = await setup(t);
 
-  const response = await app.inject({
-    method: 'POST',
-    url: '/measurements',
-    headers: otherDevice,
-    payload: {
-      eco2: 450,
-      tvoc: 12,
-      measuredAt: '2026-01-01T12:00:00.000Z',
-    },
+  const response = await ingest(app, otherDevice, {
+    measurements: [reading(2), reading(1)],
   });
 
-  assert.equal(response.statusCode, 201, response.body);
-  const saved = await app.prisma.measurement.findUniqueOrThrow({
-    where: { id: response.json().id },
-  });
-  assert.equal(saved.deviceId, otherDeviceId);
+  assert.equal(response.statusCode, 200, response.body);
+  assert.equal(
+    await app.prisma.measurement.count({ where: { deviceId: otherDeviceId } }),
+    2,
+  );
   assert.equal(await app.prisma.measurement.count({ where: { deviceId } }), 0);
 });
 
@@ -258,18 +415,9 @@ test('POST /measurements updates lastSeenAt of the device', async (t) => {
   const { app, deviceId, otherDeviceId, device, karel } = await setup(t);
 
   const before = new Date();
-  const response = await app.inject({
-    method: 'POST',
-    url: '/measurements',
-    headers: device,
-    payload: {
-      eco2: 450,
-      tvoc: 12,
-      measuredAt: '2026-01-01T12:00:00.000Z',
-    },
-  });
+  const response = await ingest(app, device, { measurements: [reading(1)] });
   const after = new Date();
-  assert.equal(response.statusCode, 201, response.body);
+  assert.equal(response.statusCode, 200, response.body);
 
   const saved = await app.prisma.device.findUniqueOrThrow({
     where: { id: deviceId },
@@ -294,15 +442,12 @@ test('POST /measurements updates lastSeenAt of the device', async (t) => {
 
 test('POST /measurements rejects the old key after rotation and accepts the new one', async (t) => {
   const { app, deviceId, device, karel } = await setup(t);
-  const payload = { eco2: 450, tvoc: 12 };
+  const [first, second, third] = [minutesAgo(3), minutesAgo(2), minutesAgo(1)];
 
-  const beforeRotation = await app.inject({
-    method: 'POST',
-    url: '/measurements',
-    headers: device,
-    payload: { ...payload, measuredAt: '2026-01-01T12:00:00.000Z' },
+  const beforeRotation = await ingest(app, device, {
+    measurements: [{ eco2: 450, tvoc: 12, measuredAt: first }],
   });
-  assert.equal(beforeRotation.statusCode, 201, beforeRotation.body);
+  assert.equal(beforeRotation.statusCode, 200, beforeRotation.body);
 
   const rotation = await app.inject({
     method: 'POST',
@@ -312,21 +457,15 @@ test('POST /measurements rejects the old key after rotation and accepts the new 
   assert.equal(rotation.statusCode, 200, rotation.body);
   const { apiKey } = rotation.json();
 
-  const oldKey = await app.inject({
-    method: 'POST',
-    url: '/measurements',
-    headers: device,
-    payload: { ...payload, measuredAt: '2026-01-01T12:01:00.000Z' },
+  const oldKey = await ingest(app, device, {
+    measurements: [{ eco2: 450, tvoc: 12, measuredAt: second }],
   });
   assert.equal(oldKey.statusCode, 401, oldKey.body);
 
-  const newKey = await app.inject({
-    method: 'POST',
-    url: '/measurements',
-    headers: deviceHeaders(apiKey),
-    payload: { ...payload, measuredAt: '2026-01-01T12:02:00.000Z' },
+  const newKey = await ingest(app, deviceHeaders(apiKey), {
+    measurements: [{ eco2: 450, tvoc: 12, measuredAt: third }],
   });
-  assert.equal(newKey.statusCode, 201, newKey.body);
+  assert.equal(newKey.statusCode, 200, newKey.body);
 
   const saved = await app.prisma.measurement.findMany({
     where: { deviceId },
@@ -334,53 +473,8 @@ test('POST /measurements rejects the old key after rotation and accepts the new 
   });
   assert.deepEqual(
     saved.map((measurement) => measurement.measuredAt.toISOString()),
-    ['2026-01-01T12:00:00.000Z', '2026-01-01T12:02:00.000Z'],
+    [first, third],
   );
-});
-
-test('POST /measurements returns 409 for a duplicate device and time', async (t) => {
-  const { app, deviceId, device, otherDevice } = await setup(t);
-  const payload = {
-    eco2: 450,
-    tvoc: 12,
-    measuredAt: '2026-01-01T12:00:00.000Z',
-  };
-
-  const first = await app.inject({
-    method: 'POST',
-    url: '/measurements',
-    headers: device,
-    payload,
-  });
-  assert.equal(first.statusCode, 201, first.body);
-
-  // Same instant expressed with a different offset is still a duplicate.
-  const duplicate = await app.inject({
-    method: 'POST',
-    url: '/measurements',
-    headers: device,
-    payload: { ...payload, eco2: 999, measuredAt: '2026-01-01T13:00:00+01:00' },
-  });
-
-  assert.equal(duplicate.statusCode, 409, duplicate.body);
-  assert.deepEqual(duplicate.json(), {
-    statusCode: 409,
-    error: 'Conflict',
-    message: 'Measurement for this device and time already exists',
-  });
-  assert.doesNotMatch(duplicate.body, /Prisma|P2002|unique|stack/i);
-
-  const saved = await app.prisma.measurement.findMany({ where: { deviceId } });
-  assert.equal(saved.length, 1);
-  assert.equal(saved[0].eco2, 450);
-
-  const fromOtherDevice = await app.inject({
-    method: 'POST',
-    url: '/measurements',
-    headers: otherDevice,
-    payload,
-  });
-  assert.equal(fromOtherDevice.statusCode, 201, fromOtherDevice.body);
 });
 
 test('GET /measurements returns saved measurements with serialized dates', async (t) => {
@@ -762,7 +856,7 @@ test("GET /measurements returns 404 for another user's device", async (t) => {
 });
 
 for (const { method, stage } of [
-  { method: 'POST', stage: 'measurement create' },
+  { method: 'POST', stage: 'batch insert' },
   { method: 'GET', stage: 'device lookup' },
   { method: 'GET', stage: 'measurement query' },
   { method: 'GET', stage: 'latest measurement query' },
@@ -783,7 +877,7 @@ for (const { method, stage } of [
           stage === 'device lookup' ? fail : async () => ({ id: deviceId }),
       },
       measurement: {
-        create: fail,
+        createMany: fail,
         findFirst: fail,
         findMany: async () => [],
         count: async () => 0,
@@ -809,11 +903,7 @@ for (const { method, stage } of [
         ? {
             method,
             url: '/measurements',
-            payload: {
-              eco2: 450,
-              tvoc: 12,
-              measuredAt: '2026-01-01T12:00:00.000Z',
-            },
+            payload: { measurements: [reading(1)] },
           }
         : stage === 'latest measurement query'
           ? { method, url: `/measurements/latest?deviceId=${deviceId}` }
