@@ -1,6 +1,7 @@
 import { Prisma, type PrismaClient } from '../../prisma/generated/client';
 import type {
-  CreateMeasurementBody,
+  IngestMeasurementsBody,
+  IngestMeasurementsResponse,
   LatestMeasurementQuery,
   ListMeasurementsQuery,
   ListMeasurementsResponse,
@@ -31,13 +32,6 @@ const toMeasurementResponse = (
     receivedAt: measurement.receivedAt.toISOString(),
   };
 };
-
-export class DuplicateMeasurementError extends Error {
-  constructor() {
-    super('Measurement for this device and time already exists');
-    this.name = 'DuplicateMeasurementError';
-  }
-}
 
 export class MeasurementNotFoundError extends Error {
   constructor() {
@@ -125,27 +119,24 @@ export const latestMeasurement = async (
   return toMeasurementResponse(measurement);
 };
 
-export const addMeasurement = async (
+export const ingestMeasurements = async (
   prisma: PrismaClient,
   deviceId: string,
-  input: CreateMeasurementBody,
-): Promise<MeasurementResponse> => {
-  try {
-    const measurement = await prisma.measurement.create({
-      data: {
-        deviceId,
-        measuredAt: input.measuredAt,
-        eco2: input.eco2,
-        tvoc: input.tvoc,
-      },
-      select: measurementSelect,
-    });
+  input: IngestMeasurementsBody,
+): Promise<IngestMeasurementsResponse> => {
+  const { count } = await prisma.measurement.createMany({
+    data: input.measurements.map(({ eco2, tvoc, measuredAt }) => ({
+      deviceId,
+      eco2,
+      tvoc,
+      measuredAt,
+    })),
+    skipDuplicates: true,
+  });
 
-    return toMeasurementResponse(measurement);
-  } catch (e) {
-    if (e instanceof Prisma.PrismaClientKnownRequestError) {
-      if (e.code === 'P2002') throw new DuplicateMeasurementError();
-    }
-    throw e;
-  }
+  return {
+    received: input.measurements.length,
+    inserted: count,
+    duplicates: input.measurements.length - count,
+  };
 };

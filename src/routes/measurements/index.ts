@@ -2,8 +2,7 @@ import { ZodTypeProvider } from '@fastify/type-provider-zod';
 import { FastifyPluginAsync } from 'fastify';
 import { DeviceNotFoundError } from '../../services/device.service';
 import {
-  addMeasurement,
-  DuplicateMeasurementError,
+  ingestMeasurements,
   latestMeasurement,
   listMeasurements,
   MeasurementNotFoundError,
@@ -13,7 +12,8 @@ import {
   errorResponseSchema,
 } from '../../schemas/common.schema';
 import {
-  createMeasurementBodySchema,
+  ingestMeasurementsBodySchema,
+  ingestMeasurementsResponseSchema,
   latestMeasurementQuerySchema,
   listMeasurementsQuerySchema,
   listMeasurementsResponseSchema,
@@ -33,14 +33,6 @@ const measurements: FastifyPluginAsync = async (fastify) => {
       return reply.code(404).send({
         statusCode: 404,
         error: 'Not Found',
-        message: error.message,
-      });
-    }
-
-    if (error instanceof DuplicateMeasurementError) {
-      return reply.code(409).send({
-        statusCode: 409,
-        error: 'Conflict',
         message: error.message,
       });
     }
@@ -69,30 +61,25 @@ const measurements: FastifyPluginAsync = async (fastify) => {
     {
       prefixTrailingSlash: 'no-slash',
       onRequest: [app.authenticateDevice],
+      bodyLimit: 256 * 1024,
       schema: {
         tags: ['Measurements'],
-        summary: 'Create a measurement',
+        summary: 'Ingest measurements',
         description:
-          'Creates a measurement for the device identified by its API key',
-        body: createMeasurementBodySchema,
+          'Stores a batch of measurements for the device identified by its API key. Duplicates are skipped',
+        body: ingestMeasurementsBodySchema,
         response: {
-          201: measurementResponseSchema,
+          200: ingestMeasurementsResponseSchema,
           400: errorResponseSchema,
           401: errorResponseSchema,
-          409: errorResponseSchema,
           500: errorResponseSchema,
         },
       },
     },
-    async (request, reply) => {
+    async (request) => {
       const device = requireDevice(request);
-      const measurement = await addMeasurement(
-        app.prisma,
-        device.id,
-        request.body,
-      );
 
-      return reply.code(201).send(measurement);
+      return ingestMeasurements(app.prisma, device.id, request.body);
     },
   );
 
