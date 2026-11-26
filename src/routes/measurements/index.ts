@@ -21,6 +21,7 @@ import {
 } from '../../schemas/measurement.schema';
 import { requireUser } from '../../plugins/auth';
 import { requireDevice } from '../../plugins/deviceAuth';
+import { RATE_LIMITS } from '../../plugins/rateLimit';
 
 const measurements: FastifyPluginAsync = async (fastify) => {
   const app = fastify.withTypeProvider<ZodTypeProvider>();
@@ -60,7 +61,10 @@ const measurements: FastifyPluginAsync = async (fastify) => {
     '/',
     {
       prefixTrailingSlash: 'no-slash',
-      onRequest: [app.authenticateDevice],
+      onRequest: [
+        app.rateLimit(RATE_LIMITS.deviceIngest),
+        app.authenticateDevice,
+      ],
       bodyLimit: 256 * 1024,
       schema: {
         tags: ['Measurements'],
@@ -72,6 +76,7 @@ const measurements: FastifyPluginAsync = async (fastify) => {
           200: ingestMeasurementsResponseSchema,
           400: errorResponseSchema,
           401: errorResponseSchema,
+          429: errorResponseSchema,
           500: errorResponseSchema,
         },
       },

@@ -11,6 +11,7 @@ import type { PrismaClient } from '../../../prisma/generated/client';
 import appPlugin from '../../../src/app';
 import type {} from '../../../src/plugins/auth';
 import type {} from '../../../src/plugins/prisma';
+import { RATE_LIMITS } from '../../../src/plugins/rateLimit';
 import deviceRoutes from '../../../src/routes/devices';
 import type {
   CreateDeviceResponse,
@@ -372,6 +373,42 @@ test('POST /devices/:id/api-key replaces the key and returns the new one', async
 
   const saved = await app.prisma.device.findUniqueOrThrow({ where: { id } });
   assert.equal(saved.apiKeyHash, sha256(body.apiKey));
+});
+
+test('POST /devices/:id/api-key limits rotations per user', async (t) => {
+  const { app, karel, jan } = await setup(t);
+  const createDevice = async (headers: Record<string, string>) => {
+    const created = await app.inject({
+      method: 'POST',
+      url: '/devices',
+      headers,
+      payload: { name: 'Kitchen' },
+    });
+    assert.equal(created.statusCode, 201, created.body);
+    return created.json<CreateDeviceResponse>().id;
+  };
+  const rotate = (id: string, headers: Record<string, string>) =>
+    app.inject({ method: 'POST', url: `/devices/${id}/api-key`, headers });
+
+  const karelDevice = await createDevice(karel.headers);
+  const janDevice = await createDevice(jan.headers);
+
+  for (let i = 0; i < RATE_LIMITS.apiKeyRotation.max; i++) {
+    const response = await rotate(karelDevice, karel.headers);
+    assert.equal(
+      response.statusCode,
+      200,
+      `rotation ${i + 1}: ${response.body}`,
+    );
+  }
+
+  const limited = await rotate(karelDevice, karel.headers);
+  assert.equal(limited.statusCode, 429, limited.body);
+  assert.equal(limited.json().error, 'Too Many Requests');
+  assert.ok(Number(limited.headers['retry-after']) > 0);
+
+  const janRotation = await rotate(janDevice, jan.headers);
+  assert.equal(janRotation.statusCode, 200, janRotation.body);
 });
 
 test('POST /devices/:id/api-key adds a key to a device that has none', async (t) => {

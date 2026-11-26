@@ -31,5 +31,6 @@ export type Pagination = z.infer<typeof paginationSchema>;
 export const authErrorResponses = {
   401: errorResponseSchema,
   409: errorResponseSchema,
+  429: errorResponseSchema,
   503: errorResponseSchema,
 };
