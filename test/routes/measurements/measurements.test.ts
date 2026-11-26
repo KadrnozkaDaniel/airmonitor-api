@@ -12,6 +12,7 @@ import appPlugin from '../../../src/app';
 import type {} from '../../../src/plugins/auth';
 import type {} from '../../../src/plugins/deviceAuth';
 import type {} from '../../../src/plugins/prisma';
+import rateLimitPlugin, { RATE_LIMITS } from '../../../src/plugins/rateLimit';
 import measurementRoutes from '../../../src/routes/measurements';
 import {
   listMeasurementsResponseSchema,
@@ -477,6 +478,55 @@ test('POST /measurements rejects the old key after rotation and accepts the new 
   );
 });
 
+test('POST /measurements returns 429 after the device exceeds the rate limit', async (t) => {
+  const { app, deviceId, device } = await setup(t);
+  const payload = { measurements: [reading(1)] };
+
+  for (let i = 0; i < RATE_LIMITS.deviceIngest.max; i++) {
+    const response = await ingest(app, device, payload);
+    assert.equal(
+      response.statusCode,
+      200,
+      `request ${i + 1}: ${response.body}`,
+    );
+  }
+
+  const limited = await ingest(app, device, {
+    measurements: [reading(2)],
+  });
+
+  assert.equal(limited.statusCode, 429, limited.body);
+  assert.equal(limited.json().statusCode, 429);
+  assert.equal(limited.json().error, 'Too Many Requests');
+  assert.match(limited.json().message, /Rate limit exceeded/);
+  assert.ok(Number(limited.headers['retry-after']) > 0);
+  assert.equal(await app.prisma.measurement.count({ where: { deviceId } }), 1);
+});
+
+test('POST /measurements counts requests with invalid keys before authenticating', async (t) => {
+  const { app, device } = await setup(t);
+  const unknownKey = deviceHeaders(generateApiKey().key);
+
+  for (let i = 0; i < RATE_LIMITS.deviceIngest.max; i++) {
+    const response = await ingest(app, unknownKey, {
+      measurements: [reading(1)],
+    });
+    assert.equal(
+      response.statusCode,
+      401,
+      `request ${i + 1}: ${response.body}`,
+    );
+  }
+
+  const invalid = await ingest(app, unknownKey, {
+    measurements: [reading(1)],
+  });
+  assert.equal(invalid.statusCode, 429, invalid.body);
+
+  const valid = await ingest(app, device, { measurements: [reading(1)] });
+  assert.equal(valid.statusCode, 429, valid.body);
+});
+
 test('GET /measurements returns saved measurements with serialized dates', async (t) => {
   const { app, deviceId, karel } = await setup(t);
   const measurement = await app.prisma.measurement.create({
@@ -896,6 +946,7 @@ for (const { method, stage } of [
         email: 'stub@test.cz',
       };
     });
+    await app.register(rateLimitPlugin);
     await app.register(measurementRoutes, { prefix: '/measurements' });
 
     const response = await app.inject(

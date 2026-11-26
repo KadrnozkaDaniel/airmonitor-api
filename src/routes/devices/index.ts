@@ -21,6 +21,7 @@ import {
   errorResponseSchema,
 } from '../../schemas/common.schema';
 import { requireUser } from '../../plugins/auth';
+import { RATE_LIMITS } from '../../plugins/rateLimit';
 
 const devices: FastifyPluginAsync = async (fastify) => {
   const app = fastify.withTypeProvider<ZodTypeProvider>();
@@ -83,6 +84,12 @@ const devices: FastifyPluginAsync = async (fastify) => {
     '/:id/api-key',
     {
       prefixTrailingSlash: 'no-slash',
+      config: {
+        rateLimit: {
+          ...RATE_LIMITS.apiKeyRotation,
+          keyGenerator: (request) => requireUser(request).id,
+        },
+      },
       schema: {
         tags: ['Devices'],
         summary: 'Rotate device API key',
